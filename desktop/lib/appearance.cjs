@@ -45,9 +45,9 @@ class Appearance {
       const previous = await this._read();
       const next = { format: FORMAT, material, revision: previous.revision + 1 };
       const directory = path.dirname(this.file);
-      await fs.mkdir(directory, { recursive: true, mode: 0o700 });
       const temporary = path.join(directory, `.dswhale-appearance-${crypto.randomBytes(8).toString('hex')}.tmp`);
       try {
+        await fs.mkdir(directory, { recursive: true, mode: 0o700 });
         const handle = await fs.open(temporary, 'wx', 0o600);
         try { await handle.writeFile(JSON.stringify(next) + '\n'); await handle.sync(); } finally { await handle.close(); }
         await fs.rename(temporary, this.file);

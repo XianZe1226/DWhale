@@ -154,14 +154,57 @@
     message = message.replace(/^(?:Error|UserActionError):\s*/i, '');
     return message || '操作未完成，请重新检查状态或导出诊断';
   }
+  const defaultAppearance = Object.freeze({ format: 1, material: 'frosted', revision: 0 });
+  function appearanceValue(value) {
+    if (value?.format !== 1 || !['frosted', 'liquid'].includes(value.material) || !Number.isInteger(value.revision) || value.revision < 0) return null;
+    return { format: 1, material: value.material, revision: value.revision };
+  }
   function createController({ bridge, preview = false } = {}) {
     const available = !!bridge && typeof bridge.invoke === 'function' && typeof bridge.onState === 'function';
     const subscribers = new Set();
-    let data = { mode: available ? 'desktop' : preview ? 'preview' : 'unavailable', pending: '', pendingExtension: '', error: '', workspaceError: '', settingsError: '', feedback: null, retry: null, dismissedError: '', dismissedFeedbackId: '', faultFeedbackId: '', settings: null, extensions: null, extensionChecks: { memory: false, memes: false }, workspaceLoaded:false, connections:null,  settingsHistory:null, workspace:{health:null,backups:[],appUpdate:null,official:null,preferences:preferencesPayload(),diagnosticFiles:[]}, notice: '', appearance: null, state: { version: '', platform: { label: '正在读取系统信息', supported: true }, phase: 'idle', installed: false, running: false, components: [], setup: {}, panel: '' } };
+    let data = { mode: available ? 'desktop' : preview ? 'preview' : 'unavailable', pending: '', pendingExtension: '', error: '', workspaceError: '', settingsError: '', feedback: null, retry: null, dismissedError: '', dismissedFeedbackId: '', faultFeedbackId: '', settings: null, extensions: null, extensionChecks: { memory: false, memes: false }, workspaceLoaded:false, connections:null,  settingsHistory:null, workspace:{health:null,backups:[],appUpdate:null,official:null,preferences:preferencesPayload(),diagnosticFiles:[]}, notice: '', appearance: null, appearancePending: false, appearanceError: '', state: { version: '', platform: { label: '正在读取系统信息', supported: true }, phase: 'idle', installed: false, running: false, components: [], setup: {}, panel: '' } };
     let unsubscribe;
     let faultSequence = 0;
     let activeReads = 0;
+    let appearanceSequence = 0;
+    let appearanceWrites = Promise.resolve();
     const emit = () => subscribers.forEach(callback => callback(data));
+    function mergeAppearance(value) {
+      const next = appearanceValue(value);
+      const committed = data.state.appearance;
+      if (!next || (committed && next.revision <= committed.revision)) return;
+      data.state.appearance = next;
+      if (!data.appearancePending) data.appearance = next;
+    }
+    function saveAppearance(material) {
+      const sequence = ++appearanceSequence;
+      data.appearance = { ...(data.state.appearance || defaultAppearance), material };
+      data.appearancePending = true;
+      data.appearanceError = '';
+      emit();
+      // Appearance has its own file and main-process queue. Keep its writes in
+      // selection order while preserving the core operation's action fence.
+      const work = appearanceWrites.catch(() => {}).then(async () => {
+        try {
+          const result = await bridge.invoke('appearance-save', { material });
+          if (result?.error) throw new Error(String(result.error));
+          if (!appearanceValue(result)) throw new Error('未能读取外观设置，请重试。');
+          mergeAppearance(result);
+          return result;
+        } catch (error) {
+          if (sequence === appearanceSequence) data.appearanceError = normalizeError(error);
+          throw error;
+        } finally {
+          if (sequence === appearanceSequence) {
+            data.appearancePending = false;
+            data.appearance = { ...(data.state.appearance || defaultAppearance) };
+          }
+          emit();
+        }
+      });
+      appearanceWrites = work;
+      return work;
+    }
     function mergeWorkspace(next) {
       if(!next||typeof next!=='object'||Array.isArray(next))throw new Error('未能读取工作空间状态，请重试。');
       for(const key of ['health','backups','appUpdate','official','diagnosticFiles'])if(Object.hasOwn(next,key))data.workspace[key]=next[key];
@@ -169,7 +212,8 @@
     }
     function merge(next) {
       if (!next || typeof next !== 'object') return;
-      const {workspace,appUpdate,connections,...state}=next;if(workspace)mergeWorkspace(workspace);
+      const {workspace,appUpdate,connections,appearance,...state}=next;if(workspace)mergeWorkspace(workspace);
+      if (Object.hasOwn(next, 'appearance')) mergeAppearance(appearance);
       if(Object.hasOwn(next,'appUpdate'))mergeWorkspace({appUpdate});
       if(Object.hasOwn(next,'connections'))data.connections=connections||null;
       // Only an explicit main-process error clear ends a dismissal. A routine
@@ -214,6 +258,7 @@
       if(action==='app-update-rollback')payload={restoreData:payload?.restoreData===true,confirmDataRestore:payload?.confirmDataRestore===true};
       if(action==='appearance-save'){if(!['frosted','liquid'].includes(payload?.material))throw new Error('请选择受支持的外观材质。');payload={material:payload.material};}
       if (!available) throw new Error(preview ? '界面预览为只读模式，请在桌面应用中执行操作。' : '请在 DWhale 桌面应用中执行操作。');
+      if (action === 'appearance-save') return saveAppearance(payload.material);
       const readOnly = concurrentReadActions.has(action);
       if (data.pending && (!readOnly || !concurrentReadActions.has(data.pending))) throw new Error('上一项操作仍在进行，请稍候。');
       if (!readOnly && activeReads > 0) throw new Error('上一项操作仍在进行，请稍候。');
@@ -293,8 +338,7 @@
         }
         else if (action === 'backup' && !result?.canceled) data.notice = '备份已保存到所选位置。';
         else if (action === 'restore' && !result?.canceled) { data.notice = '备份已导入，请检查配置后启动服务'; data.settings = null; data.extensions = null; data.extensionChecks = { memory: false, memes: false }; }
-        else if (action === 'appearance-get') data.appearance = result;
-        else if (action === 'appearance-save') { data.appearance = result; data.notice = '外观已保存。'; }
+        else if (action === 'appearance-get') mergeAppearance(result);
         else if (action === 'open-data') data.notice = '已打开数据文件夹。';
         if (result && ('phase' in result || 'components' in result || 'running' in result || 'installed' in result || 'platform' in result || 'versionMatrix' in result || 'upstreamCore' in result || 'appearance' in result || 'chrome' in result)) merge(result);
         if(['install','restore'].includes(action)&&!result?.canceled) {
