@@ -185,13 +185,17 @@ async function settingsCommand(manager, action, payload) {
   const environment = { ...await manager.environment(), PYTHONPATH: manager.source, PYTHONDONTWRITEBYTECODE: '1' };
   return new Promise((resolve, reject) => {
     const child = spawn(manager.python, ['-m', 'dswhale.desktop_settings', action, '--host', manager.host], { cwd: manager.source, env: environment, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
-    let output = '', tooLarge = false;
-    const timer = setTimeout(() => child.kill(), 15000);
+    let output = '', tooLarge = false, timedOut = false;
+    // A Windows migration establishes private DACLs through several bounded
+    // PowerShell calls. Keep the overall operation bounded without killing a
+    // valid cold migration after only fifteen seconds.
+    const timer = setTimeout(() => { timedOut = true; child.kill(); }, 60000);
     child.stdout.on('data', value => { output += value.toString('utf8'); if (output.length > 65536) { tooLarge = true; child.kill(); } });
     child.stderr.resume();
     child.on('error', () => { clearTimeout(timer); reject(new Error('请先准备运行环境')); });
     child.on('close', code => {
       clearTimeout(timer);
+      if (timedOut) return reject(new Error('配置处理超时，请稍后重试'));
       let value;
       try { value = JSON.parse(output); } catch { value = null; }
       if (tooLarge || code || !value || typeof value !== 'object') return reject(new Error('配置未完成，请停止服务并检查输入后重试'));

@@ -266,3 +266,30 @@ test('settings commands ignore a stale host package and keep configuration write
   const bundleFiles = await fs.readdir(source, { recursive: true });
   assert.equal(bundleFiles.some(file => file.split(path.sep).includes('__pycache__') || file.endsWith('.pyc')), false);
 });
+
+test('settings migrations allow bounded Windows ACL work and report genuine timeouts', async () => {
+  const module = { exports: {} };
+  let expire, deadline;
+  const source = await fs.readFile(path.join(__dirname, '../lib/services.cjs'), 'utf8');
+  vm.runInNewContext(source, {
+    module,
+    require: name => name === 'node:child_process' ? { spawn() {
+      const child = new EventEmitter();
+      child.stdin = new PassThrough(); child.stdout = new PassThrough(); child.stderr = new PassThrough();
+      child.kill = () => { child.emit('close', null); };
+      return child;
+    } } : require(name),
+    process, Buffer,
+    setTimeout: (callback, milliseconds) => { expire = callback; deadline = milliseconds; return 1; },
+    clearTimeout() {},
+  });
+  const pending = module.exports.settingsCommand({
+    python: 'synthetic-python', source: '/synthetic/source', host: '/synthetic/host',
+    environment: async () => ({}),
+  }, 'migrate');
+  const rejected = assert.rejects(pending, /配置处理超时/);
+  await new Promise(setImmediate);
+  expire();
+  await rejected;
+  assert.equal(deadline, 60000);
+});

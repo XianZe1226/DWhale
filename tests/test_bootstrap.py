@@ -1762,3 +1762,34 @@ def test_rollback_entry_is_fenced_while_host_is_running_but_finalize_remains_ava
         monkeypatch.setattr(sys, "argv", ["bootstrap.py", "finalize"])
         module.main()
     assert events == ["finalize"]
+
+
+@pytest.mark.parametrize("required", [False, True])
+def test_staged_verification_respects_deferred_source_config_creation(
+    tmp_path, monkeypatch, required
+):
+    import importlib.metadata
+    import os
+    import sys
+
+    module = bootstrap()
+    source = Path(__file__).parents[1]
+    host = tmp_path / "staging/host"
+    for plugin in ("astrbot_plugin_dswhale", "astrbot_plugin_livingmemory"):
+        main = host / "data/plugins" / plugin / "main.py"
+        main.parent.mkdir(parents=True)
+        main.write_text("pass\n", encoding="utf-8")
+    monkeypatch.setattr(
+        module, "runtime_lock_matrix", lambda: {"astrbot": importlib.metadata.version("astrbot")}
+    )
+    environment = {
+        **os.environ,
+        "ASTRBOT_ROOT": str(host),
+        "DSWHALE_REQUIRE_CONFIG": "1" if required else "0",
+    }
+    if required:
+        with pytest.raises(RuntimeError, match="配置或插件缺失"):
+            module._staged_verify(source, host.parent, host, Path(sys.executable), environment)
+    else:
+        module._staged_verify(source, host.parent, host, Path(sys.executable), environment)
+    assert not (host / "data/cmd_config.json").exists()

@@ -427,7 +427,9 @@ for plugin in ("astrbot_plugin_dswhale", "astrbot_plugin_livingmemory"):
         compile(main.read_text(encoding="utf-8"), str(main), "exec")
     else:
         payload["plugins_compile"] = False
-json.loads((root / "data/cmd_config.json").read_text(encoding="utf-8-sig"))
+config_file = root / "data/cmd_config.json"
+if config_file.is_file():
+    json.loads(config_file.read_text(encoding="utf-8-sig"))
 print(json.dumps(payload))
 """
     data = json.loads(output([staging_python, "-c", script], cwd=staging_host, env=env))
@@ -436,7 +438,10 @@ print(json.dumps(payload))
     matrix = runtime_lock_matrix()
     if data.get("dswhale") != version or data.get("astrbot") != matrix["astrbot"]:
         raise RuntimeError("升级目标环境自检失败：版本与运行时锁不一致")
-    if not all(data.get(key) for key in ("config", "dswhale_plugin", "memory_plugin")):
+    required = ["dswhale_plugin", "memory_plugin"]
+    if env.get("DSWHALE_REQUIRE_CONFIG", "1") == "1":
+        required.append("config")
+    if not all(data.get(key) for key in required):
         raise RuntimeError("升级目标环境自检失败：配置或插件缺失")
     if (
         data.get("db") not in ("absent", "ok")
@@ -887,6 +892,10 @@ def _prepare(source, runtime):
                 "ASTRBOT_ROOT": str(staging_host),
                 "DSWHALE_STAGING": "1",
                 "DSWHALE_DESKTOP": os.environ.get("DSWHALE_DESKTOP", ""),
+                "DSWHALE_REQUIRE_CONFIG": "1"
+                if os.environ.get("DSWHALE_DESKTOP") == "1"
+                or (host / "data/cmd_config.json").is_file()
+                else "0",
             }
             progress("python", 0.2)
             compatible = False

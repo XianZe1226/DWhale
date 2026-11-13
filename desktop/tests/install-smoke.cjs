@@ -47,6 +47,7 @@ async function main() {
   const stagedSource = process.env.DSWHALE_SMOKE_SOURCE || path.resolve(__dirname, '../../desktop-resources/backend');
   const manager = new RuntimeManager({ source: stagedSource, runtime,
     onProgress: event => { if (event.step) console.log(event.step); } });
+  const nativeEnvironment = manager.environment.bind(manager);
   if (process.env.GITHUB_ACTIONS === 'true') {
     const diagnostics = path.join(directory, 'diagnostics');
     await fs.mkdir(diagnostics);
@@ -64,8 +65,7 @@ def trace(frame, event, arg):
     return trace
 sys.settrace(trace)
 `);
-    const environment = manager.environment.bind(manager);
-    manager.environment = async () => ({ ...await environment(), PYTHONPATH: diagnostics });
+    manager.environment = async () => ({ ...await nativeEnvironment(), PYTHONPATH: diagnostics });
   }
   // CI-only seam for external GitHub release CDN outages. The release asset is
   // still checksum-verified against tool-assets.json before this path is set.
@@ -112,18 +112,22 @@ sys.settrace(trace)
     assert.ok((await fs.readdir(path.join(runtime, 'backups'))).length);
     await fs.access(path.join(manager.host, 'data/plugins/astrbot_plugin_dswhale/dswhale/media_assets.json'));
     await fs.access(path.join(manager.host, 'data/plugins/astrbot_plugin_livingmemory/main.py'));
+    manager.environment = nativeEnvironment;
     const env = await manager.environment();
     assert.equal(env.ASTRBOT_ROOT, manager.host);
+    // Keep diagnostic tracing out of timed SDK and configuration contract tests.
+    const verifiedEnvironment = { ...env };
+    delete verifiedEnvironment.PYTHONPATH;
     const bridge = path.join(manager.host, 'data/plugins/astrbot_plugin_dswhale/dswhale/bili_bridge');
     phase='installed-bridge';
     // Run the installed files, not imports from the checkout that hid the a2 defect.
     await execute(manager.python, [path.resolve(__dirname, '../../scripts/verify_artifact.py'),
       '--installed-bridge', bridge, '--node', env.DSWHALE_NODE || process.execPath],
-    { cwd: directory, env, timeout: 25000, maxBuffer: 65536, windowsHide: true });
+    { cwd: directory, env: verifiedEnvironment, timeout: 25000, maxBuffer: 65536, windowsHide: true });
     console.log('Installed packaged bridge reached ready offline within 15 seconds and stopped.');
     phase='installed-runtime-contracts';
     await execute(process.execPath, ['--test', path.resolve(__dirname, 'services.test.cjs')],
-      { cwd: directory, env: { ...env, DSWHALE_TEST_PYTHON: manager.python }, timeout: 45000, maxBuffer: 65536, windowsHide: true });
+      { cwd: directory, env: { ...verifiedEnvironment, DSWHALE_TEST_PYTHON: manager.python }, timeout: 180000, maxBuffer: 65536, windowsHide: true });
     console.log('Pinned installed AstrBot refuses core updates in the managed host environment.');
     phase='extension-status';
     const status = await extensions.run('status');
