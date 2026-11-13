@@ -11,11 +11,12 @@ const path = require('node:path');
 const vm = require('node:vm');
 const { createRequire } = require('node:module');
 
-function harness({ backendRunning = true, qqRunning = true, backendReadyWait, startFails = false, settingsFails = false, migrateFails = false, hostQuery = null, extensionsRun = async () => ({}), contentSize = [1220, 850] } = {}) {
+function harness({ platform = process.platform, backendRunning = true, qqRunning = true, backendReadyWait, startFails = false, settingsFails = false, migrateFails = false, hostQuery = null, extensionsRun = async () => ({}), contentSize = [1220, 850] } = {}) {
   const file = path.resolve(__dirname, '../main.cjs'), native = createRequire(file);
   const settingsCommands = [];
   const events = [], snapshots = [], loadedURLs = [], views = [];
   const userData = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'dwhale-main-'));
+  test.after(() => fs.rmSync(userData, { recursive: true, force: true }));
   const settingsState = { configRevision: 'abcdef12', defaultDelivery: 'napcat', napcatBound: true, officialBound: false, officialOwnerUMO: '' };
   const supervisor = {
     dashboard: async () => 'http://127.0.0.1:6185/', running: backendRunning,
@@ -49,7 +50,7 @@ function harness({ backendRunning = true, qqRunning = true, backendReadyWait, st
     session: { fromPartition: () => ({ clearStorageData: async () => {} }) },
     WebContentsView: LocalView,
     dialog: { showMessageBox: async () => ({ response: 1 }) },
-    app: { setName() {}, addPath() {}, setPath() {}, getVersion: () => '0.3.0-alpha.12', getPath: name => name === 'userData' ? userData : path.join(userData, name), requestSingleInstanceLock: () => true, whenReady: () => new Promise(() => {}), on() {} },
+    app: { setName() {}, setAppUserModelId() {}, addPath() {}, setPath() {}, getVersion: () => '0.3.0-alpha.12', getPath: name => name === 'userData' ? userData : path.join(userData, name), requestSingleInstanceLock: () => true, whenReady: () => new Promise(() => {}), on() {} },
     protocol: { registerSchemesAsPrivileged() {} },
   };
   const fakeServices = {
@@ -70,7 +71,7 @@ function harness({ backendRunning = true, qqRunning = true, backendReadyWait, st
   const context = {
     require: name => name === 'electron' ? electron : name === './lib/services.cjs' ? fakeServices
       : name === 'node:fs/promises' ? native(name) : native(name),
-    __dirname: path.dirname(file), process, console, Buffer, setTimeout, clearTimeout,
+    __dirname: path.dirname(file), process: { ...process, platform }, console, Buffer, setTimeout, clearTimeout,
   };
   vm.runInNewContext(fs.readFileSync(file, 'utf8') + `;globalThis.hooks={perform,stopAll,publishOfficialStatus,refresh,reportActionError,adoptPackagedTransitionLock,getState:()=>state,set(values){
     state.installed=true;operations={snapshot:async()=>{}};hostCommand=async()=>{};manager=values.manager;supervisor=values.supervisor;
@@ -376,13 +377,14 @@ test('R7: a main-process read failure is a scoped warning envelope, a real actio
   assert.notEqual(save.feedback.operationId, read.feedback.operationId);
 });
 
-test('R3: the packaged installer-digest chain wins and a mismatched writable chain is archived', async () => {
+test('R3: the packaged installer-digest chain wins and a mismatched writable chain is archived', async t => {
   const fs = require('node:fs/promises');
   const os = require('node:os');
   const crypto = require('node:crypto');
   const updateChain = require('../lib/update-chain.cjs');
   const h = harness();
   const source = await fs.mkdtemp(path.join(os.tmpdir(), 'dwhale-intent-source-'));
+  t.after(() => fs.rm(source, { recursive: true, force: true }));
   const suffix = { 'win32-x64': 'Windows-x86_64-setup.exe', 'darwin-arm64': 'macOS-arm64.dmg', 'linux-x64': 'Linux-x86_64.deb' };
   const chain = (id, manifestDigest) => ({
     format: 1,
@@ -421,6 +423,7 @@ test('R3: the packaged installer-digest chain wins and a mismatched writable cha
   assert.equal((await fs.readdir(updates)).filter(name => name.startsWith('transition-lock.abandoned-')).length, 2);
 
   const tampered = await fs.mkdtemp(path.join(os.tmpdir(), 'dwhale-intent-tampered-'));
+  t.after(() => fs.rm(tampered, { recursive: true, force: true }));
   const bad = chain('f'.repeat(32), '5'.repeat(64));
   bad.fixedFinalTarget.manifestSha256 = 'not-a-digest';
   await fs.writeFile(path.join(tampered, 'transition-lock.json'), JSON.stringify(bad));
@@ -460,6 +463,7 @@ test('R3: the packaged installer-digest chain wins and a mismatched writable cha
   const foreign = chain('e'.repeat(32), '3'.repeat(64));
   foreign.bridge = { version: '0.4.0a0', tag: 'v0.4.0a0' };
   const foreignSource = await fs.mkdtemp(path.join(os.tmpdir(), 'dwhale-intent-foreign-'));
+  t.after(() => fs.rm(foreignSource, { recursive: true, force: true }));
   await fs.writeFile(path.join(foreignSource, 'transition-lock.json'), JSON.stringify(foreign));
   assert.equal(await h.adoptPackagedTransitionLock(foreignSource), null, 'a chain for another bridge never adopts');
   assert.equal(JSON.parse(await fs.readFile(path.join(updates, 'transition-lock.json'), 'utf8')).chainId, packaged.chainId);
@@ -496,4 +500,11 @@ test('background official observations preserve the readiness stage until startu
   gate.release();
   await start;
   assert.equal(h.getState().startup.stage, 'official-connecting');
+});
+
+test('Windows main-process harness can stop without starting any service', async () => {
+  const h = harness({ platform: 'win32' });
+  const state = await h.perform('stop');
+  assert.equal(state.running, false);
+  assert.deepEqual(h.events, ['stop-conversation']);
 });

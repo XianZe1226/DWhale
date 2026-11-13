@@ -52,8 +52,8 @@ test('actual Electron action dispatcher routes manual extension actions to the u
   const fs = require('node:fs'), path = require('node:path'), vm = require('node:vm');
   const file = path.resolve(__dirname, '../main.cjs');
   const nativeRequire = require('node:module').createRequire(file);
-  const app = { setName() {}, getVersion: () => 'fixture', requestSingleInstanceLock: () => false, quit() {} };
-  const sandbox = { require: id => id === 'electron' ? { app, protocol: { registerSchemesAsPrivileged() {} } } : nativeRequire(id), __dirname: path.dirname(file), process, module: { exports: {} }, setTimeout, clearTimeout };
+  const app = { setName() {}, setAppUserModelId() {}, getVersion: () => 'fixture', requestSingleInstanceLock: () => false, quit() {} };
+  const sandbox = { require: id => id === 'electron' ? { app, protocol: { registerSchemesAsPrivileged() {} } } : nativeRequire(id), __dirname: path.dirname(file), process: { ...process, platform: 'win32' }, module: { exports: {} }, setTimeout, clearTimeout };
   const source = fs.readFileSync(file, 'utf8') + '\n globalThis.harness = { perform, set(value) { state.installed = true; extensions = value.runner; supervisor = value.supervisor; manager = value.manager; } };';
   vm.runInNewContext(source, sandbox, { filename: file });
   const calls = [], cards = { memory: { installed: true }, memes: { installed: false } };

@@ -366,19 +366,54 @@ test('duplicate version probes for one tool are coalesced inside an inspect pass
   assert.equal(calls, 1);
 });
 
-test('activation maintenance finalizes or rolls back through the managed runtime', async () => {
-  const dir=await fs.mkdtemp(path.join(os.tmpdir(),'dswhale-activate-'));
+test('activation maintenance finalizes or rolls back through the managed Windows runtime', async () => {
+  const fsSync = require('node:fs');
+  const vm = require('node:vm');
+  const { EventEmitter } = require('node:events');
+  const file = path.resolve(__dirname, '../lib/runtime.cjs');
+  const nativeRequire = require('node:module').createRequire(file);
+  const loaded = { exports: {} };
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'dswhale-activate-'));
+  const executable = path.join(dir, 'venv', 'Scripts', 'python.exe');
+  const actions = [];
+  // Keep the managed executable lookup and bounded activation protocol real.
+  // A fake child replaces process creation, so this also covers Windows on macOS.
+  const spawn = (command, args, options) => {
+    assert.equal(command, executable);
+    assert.equal(args[0], path.join(dir, 'scripts', 'bootstrap.py'));
+    assert.ok(['finalize', 'rollback'].includes(args[1]));
+    assert.equal(options.cwd, dir);
+    assert.equal(options.env.DSWHALE_RUNTIME_DIR, dir);
+    assert.equal(options.env.PYTHONUTF8, '1');
+    assert.equal(options.windowsHide, true);
+    assert.equal(options.detached, false);
+    actions.push(args[1]);
+    const child = new EventEmitter();
+    child.stdout = new EventEmitter();
+    child.stderr = new EventEmitter();
+    queueMicrotask(() => {
+      const result = args[1] === 'finalize' ? 'finalized' : 'rolled-back';
+      child.stdout.emit('data', Buffer.from(`DSWHALE_ACTIVATION ${result}\n`));
+      child.emit('close', 0);
+    });
+    return child;
+  };
+  vm.runInNewContext(fsSync.readFileSync(file, 'utf8'), {
+    module: loaded,
+    require: name => name === 'node:child_process' ? { spawn } : nativeRequire(name),
+    process: { ...process, platform: 'win32' }, Buffer, setTimeout, clearTimeout,
+  });
   try {
-    const bin=path.join(dir,'venv',process.platform==='win32'?'Scripts':'bin');
-    await fs.mkdir(bin,{recursive:true});
-    const script=path.join(bin,process.platform==='win32'?'python.exe':'python');
-    await fs.writeFile(script,`#!/bin/sh\n[ "$DSWHALE_RUNTIME_DIR" = ${JSON.stringify(dir)} ] || exit 9\nif [ "$2" = finalize ]; then printf 'DSWHALE_ACTIVATION finalized\\n'; else printf 'DSWHALE_ACTIVATION rolled-back\\n'; fi\n`);
-    await fs.chmod(script,0o755);
-    const manager=new runtime.RuntimeManager({source:dir,runtime:dir});
-    assert.equal(await manager.finalizeActivation(),true);
-    assert.equal(await manager.rollbackActivation(),true);
-    await assert.rejects(manager.maintainActivation('unknown'),/未知|maintenance/);
-    await fs.rm(script,{force:true});
-    assert.equal(await manager.finalizeActivation(),false);
-  } finally {await fs.rm(dir,{recursive:true,force:true});}
+    await fs.mkdir(path.dirname(executable), { recursive: true });
+    await fs.writeFile(executable, 'synthetic managed executable placeholder');
+    const manager = new loaded.exports.RuntimeManager({ source: dir, runtime: dir });
+    assert.equal(await manager.finalizeActivation(), true);
+    assert.equal(await manager.rollbackActivation(), true);
+    await assert.rejects(manager.maintainActivation('unknown'), /未知|maintenance/);
+    await fs.rm(executable, { force: true });
+    assert.equal(await manager.finalizeActivation(), false);
+    assert.deepEqual(actions, ['finalize', 'rollback']);
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
 });

@@ -6,7 +6,7 @@ const path = require('node:path');
 const vm = require('node:vm');
 const { createRequire } = require('node:module');
 
-function harness({ saveFails = false, recovery = {}, backendRunning = true, qqRunning = true, loginState = 'online', backendReadyWait, qqStatusWait, qqConfigureWait, qqMode='napcat', startFails = false, settingsOverrides = {}, hostQuery = null, workspace = null, dialogResponse = 1, settingsHistory = null, useRealWorkspace = false } = {}) {
+function harness({ platform = process.platform, saveFails = false, recovery = {}, backendRunning = true, qqRunning = true, loginState = 'online', backendReadyWait, qqStatusWait, qqConfigureWait, qqMode='napcat', startFails = false, settingsOverrides = {}, hostQuery = null, workspace = null, dialogResponse = 1, settingsHistory = null, useRealWorkspace = false } = {}) {
   const file = path.resolve(__dirname, '../main.cjs'), native = createRequire(file);
   const events = [], snapshots = [], loadedURLs = [], savePayloads = [], restorePayloads = [], wirePorts = [], views = [];
   const settingsState = { configRevision: 'abcdef12', defaultDelivery: 'official', officialBound: false, officialOwnerUMO: '', ...settingsOverrides };
@@ -18,7 +18,7 @@ function harness({ saveFails = false, recovery = {}, backendRunning = true, qqRu
   class LocalView { constructor() { views.push(this); this.webContents={setWindowOpenHandler(){},on(){},close(){},isDestroyed:()=>false,loadURL:async url=>{loadedURLs.push(url);events.push('open-qq-management');}}; } setBounds(){} }
   const dialogs = [];
   const dialogReply = typeof dialogResponse === 'function' ? dialogResponse : () => dialogResponse;
-  const electron = { session:{fromPartition:()=>({clearStorageData:async()=>{}})}, WebContentsView:LocalView, dialog:{showMessageBox:async(...args)=>{dialogs.push(args.at(-1));return {response:dialogReply()};}}, app: { setName() {}, getVersion: () => '0.3.0-alpha.8', requestSingleInstanceLock: () => true,
+  const electron = { session:{fromPartition:()=>({clearStorageData:async()=>{}})}, WebContentsView:LocalView, dialog:{showMessageBox:async(...args)=>{dialogs.push(args.at(-1));return {response:dialogReply()};}}, app: { setName() {}, setAppUserModelId() {}, getVersion: () => '0.3.0-alpha.8', requestSingleInstanceLock: () => true,
     whenReady: () => new Promise(() => {}), on() {} }, protocol: { registerSchemesAsPrivileged() {} } };
   const fakeServices = { ...native('./lib/services.cjs'), settingsCommand: async (_manager, command, payload) => {
     if (command === 'save') {
@@ -38,7 +38,7 @@ function harness({ saveFails = false, recovery = {}, backendRunning = true, qqRu
   } };
   const context = { require: name => name === 'electron' ? electron : name === './lib/services.cjs' ? fakeServices
     : name === 'node:fs/promises' ? {writeFile:async()=>{},rm:async()=>{}, readdir: async () => { throw Object.assign(Error(), { code: 'ENOENT' }); } } : native(name),
-    __dirname: path.dirname(file), process, console, Buffer, setTimeout, clearTimeout };
+    __dirname: path.dirname(file), process: { ...process, platform }, console, Buffer, setTimeout, clearTimeout };
   vm.runInNewContext(fs.readFileSync(file, 'utf8') + `;globalThis.hooks={perform,stopAll,publishOfficialStatus,restoreFile,refresh,getState:()=>state,requestShutdown:()=>{shutdownRequested=true;},set(values){
     state.installed=true;operations={snapshot:async()=>{}};hostCommand=async()=>{};manager=values.manager; supervisor=values.supervisor;
     window={isDestroyed:()=>false,webContents:{send:(_channel,value)=>values.snapshot(value)},contentView:{addChildView(){},removeChildView(){}},getContentSize:()=>[1220,850]};
@@ -317,4 +317,11 @@ test('a stale connections response cannot overwrite the newer published state', 
   const finalConnections = h.getState().connections;
   assert.equal(finalConnections.channels.find(item => item.channel === 'official').platformEnabled, false);
   assert.equal(finalConnections.revision, fresh.connections.revision);
+});
+
+test('Windows lifecycle harness stops only the owned conversation', async () => {
+  const h = harness({ platform: 'win32' });
+  await h.perform('stop');
+  assert.equal(h.supervisor.running, false);
+  assert.deepEqual(h.events, ['stop-conversation']);
 });

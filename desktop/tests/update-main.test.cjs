@@ -8,8 +8,8 @@ const {createRequire}=require('node:module');
 function mainHarness(options) {
  const file=path.resolve(__dirname,'../main.cjs'),realRequire=createRequire(file),events=[];
  const dialog=options?.dialog||{showOpenDialog:async()=>({canceled:true}),showMessageBox:async()=>({response:1})};
- const electron={app:{setName(){},getVersion:()=> '0.3.0-alpha.5',requestSingleInstanceLock:()=>true,whenReady:()=>new Promise(()=>{}),on(){},quit:()=>events.push('quit')},protocol:{registerSchemesAsPrivileged(){}},powerMonitor:{},dialog};
- const context={updateScheduler:null,require:name=>name==='electron'?electron:realRequire(name),__dirname:path.dirname(file),process,console,Buffer,setTimeout,clearTimeout};
+ const electron={app:{setName(){},setAppUserModelId(){},getVersion:()=> '0.3.0-alpha.5',requestSingleInstanceLock:()=>true,whenReady:()=>new Promise(()=>{}),on(){},quit:()=>events.push('quit')},protocol:{registerSchemesAsPrivileged(){}},powerMonitor:{},dialog};
+ const context={updateScheduler:null,require:name=>name==='electron'?electron:realRequire(name),__dirname:path.dirname(file),process:{...process,platform:options?.platform||process.platform},console,Buffer,setTimeout,clearTimeout};
  vm.runInNewContext(fs.readFileSync(file,'utf8')+`;globalThis.hooks={perform,reportActionError,restore,settingsEnvelope,settingsPatchChanged,scheduleInstallerExit,setHandoff(value){installerHandedOff=value;},exitScheduled:()=>installerExitScheduled,configure(value){operations=value.operations;appUpdater=value.updater;updateScheduler=value.scheduler;workspace=value.workspace;supervisor=value.supervisor;}};`,context);
  context.hooks.configure({updater:{},scheduler:{cancel:async()=>events.push('cancel-auto')},workspace:{perform:async(action,payload)=>{events.push([action,payload]);return {ok:true};}},supervisor:{stop:async()=>events.push('stop')},napcat:{stop:async()=>events.push('stop-qq')},...options});return {...context.hooks,events};
 }
@@ -96,4 +96,10 @@ test('ordinary cold-start failures cannot roll back the committed runtime genera
  assert.doesNotMatch(source,/supervisor\.start\s*=\s*async/);
  assert.doesNotMatch(source,/manager\.rollbackActivation\(\)/);
  assert.match(source,/prepare\(\)/);
+});
+
+test('Windows update harness keeps ordinary stop available', async () => {
+ const h = mainHarness({ platform: 'win32' });
+ await h.perform('stop');
+ assert.deepEqual(h.events, ['stop']);
 });
