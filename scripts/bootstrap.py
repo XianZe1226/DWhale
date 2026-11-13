@@ -368,11 +368,11 @@ def main():
     action = sys.argv[1] if len(sys.argv) > 1 else ""
     if action in {"finalize", "rollback"}:
         with FileLock(runtime / "setup.lock", timeout=0):
-            changed = (
-                _finalize_activation(runtime)
-                if action == "finalize"
-                else rollback_activation(runtime)
-            )
+            if action == "finalize":
+                changed = _finalize_activation(runtime)
+            else:
+                with FileLock(runtime / "host-lifecycle.lock", timeout=0):
+                    changed = rollback_activation(runtime)
         label = "finalized" if action == "finalize" else "rolled-back"
         print("DSWHALE_ACTIVATION " + (label if changed else "none"))
         return
@@ -822,6 +822,17 @@ def _record_upstream_observation(source, runtime):
 
 def prepare(source, runtime):
     runtime.mkdir(parents=True, exist_ok=True)
+    with FileLock(runtime / "host-lifecycle.lock", timeout=0):
+        # Older hosts only hold the upstream lock. Reject them before recovery
+        # can rename any generation, then keep the stable gate through commit.
+        host = runtime / "astrbot"
+        if host.exists():
+            with FileLock(host / "astrbot.lock", timeout=0):
+                pass
+        _prepare(source, runtime)
+
+
+def _prepare(source, runtime):
     # A previous process may have exited between any two activation renames.
     # Resolve that journal before creating a fresh host or staging tree.
     _recover_activation(runtime)
@@ -1030,6 +1041,9 @@ def prepare(source, runtime):
             if upgrade and _config_revision(host) != revision:
                 raise RuntimeError("升级准备期间原配置发生变化，已停止激活并保留原环境")
             progress("activate", 0.92)
+            # Windows cannot rename a tree containing an open lock file.
+            # The stable lifecycle gate still excludes every managed host start.
+            lock.release()
             _activate(runtime, host, staging, staging_host, staging_venv, upgrade)
             try:
                 _post_activation_verify(source, runtime, host, runtime / "venv", env)

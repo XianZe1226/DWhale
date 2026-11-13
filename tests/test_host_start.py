@@ -19,7 +19,9 @@ def host_start():
     return module
 
 
-def test_host_gate_covers_migration_and_execution_without_blocking_setup_reads(tmp_path, monkeypatch):
+def test_host_gate_covers_migration_and_execution_without_blocking_setup_reads(
+    tmp_path, monkeypatch
+):
     module = host_start()
     runtime = tmp_path / "runtime"
     host = runtime / "astrbot"
@@ -40,9 +42,10 @@ def test_host_gate_covers_migration_and_execution_without_blocking_setup_reads(t
         locked_gate()
         events.append("migrate")
 
-    def run_module(name, *, run_name):
+    def run_module(name, *, run_name, alter_sys):
         assert name == "astrbot.cli"
         assert run_name == "__main__"
+        assert alter_sys is True
         assert sys.argv == ["astrbot.cli", "run"]
         assert Path.cwd() == host
         locked_gate()
@@ -105,7 +108,9 @@ def test_host_script_reports_busy_gate_before_loading_upstream(tmp_path, monkeyp
             module.main(["--runtime", str(runtime)])
 
 
-@pytest.mark.parametrize("journal", [{"phase": "activating"}, {"phase": "activated"}, "invalid JSON"])
+@pytest.mark.parametrize(
+    "journal", [{"phase": "activating"}, {"phase": "activated"}, "invalid JSON"]
+)
 def test_uncommitted_generation_cannot_accept_host_writes(tmp_path, monkeypatch, journal):
     module = host_start()
     runtime = tmp_path / "runtime"

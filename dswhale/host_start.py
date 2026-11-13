@@ -26,7 +26,10 @@ def run_host(runtime, *, environment=None):
                 journal = json.loads(journal_file.read_text(encoding="utf-8"))
             except (OSError, ValueError):
                 raise SystemExit("运行环境准备尚未完成，请先重新准备环境") from None
-            if not isinstance(journal, dict) or journal.get("phase") not in {"committed", "finalizing"}:
+            if not isinstance(journal, dict) or journal.get("phase") not in {
+                "committed",
+                "finalizing",
+            }:
                 raise SystemExit("运行环境准备尚未完成，请先重新准备环境")
         previous_argv = sys.argv
         previous_directory = Path.cwd()
@@ -40,7 +43,7 @@ def run_host(runtime, *, environment=None):
             os.chdir(host)
             sys.argv = ["astrbot.cli", "run"]
             # The host shares this process and cannot outlive its lifecycle lock.
-            runpy.run_module("astrbot.cli", run_name="__main__")
+            runpy.run_module("astrbot.cli", run_name="__main__", alter_sys=True)
             return 0
         finally:
             sys.argv = previous_argv

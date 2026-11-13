@@ -1604,3 +1604,161 @@ def unlink(self, *args, **kwargs):
 Path.unlink = unlink
 """,
     )
+
+
+def test_prepare_closes_host_lock_before_windows_directory_swap(tmp_path, monkeypatch):
+    from filelock import FileLock, Timeout
+
+    module, runtime, host, original_config, receipt, venv = _staging_prepare_fixture(
+        tmp_path, monkeypatch
+    )
+    source = Path(module.__file__).resolve().parents[1]
+    monkeypatch.setattr(module, "_staged_verify", lambda *args, **kwargs: {})
+    monkeypatch.setattr(module, "_post_activation_verify", lambda *args, **kwargs: {})
+    monkeypatch.setattr(module, "_record_upstream_observation", lambda *args, **kwargs: None)
+    replace = Path.replace
+    swaps = []
+
+    def windows_replace(path, target):
+        if path == host:
+            # Windows prevents a directory rename while its lock file is open.
+            try:
+                with FileLock(host / "astrbot.lock", timeout=0):
+                    pass
+            except Timeout as error:
+                raise PermissionError("Windows host directory has an open lock file") from error
+            with pytest.raises(Timeout):
+                FileLock(runtime / "setup.lock", timeout=0).acquire()
+            with pytest.raises(Timeout):
+                FileLock(runtime / "host-lifecycle.lock", timeout=0).acquire()
+            swaps.append(path)
+        return replace(path, target)
+
+    monkeypatch.setattr(Path, "replace", windows_replace)
+    with FileLock(runtime / "setup.lock", timeout=0):
+        module.prepare(source, runtime)
+    assert swaps == [host]
+    assert (host / "data/memory.db").read_bytes() == b"keep-memory"
+    assert (host / "data/cmd_config.json").read_bytes() == original_config
+    assert not (runtime / "activation.json").exists()
+    assert not (runtime / "transactions").exists()
+    with FileLock(host / "astrbot.lock", timeout=0):
+        pass
+
+
+def test_prepare_refuses_a_busy_host_before_running_installers(tmp_path, monkeypatch):
+    from filelock import FileLock, Timeout
+
+    module, runtime, host, original_config, receipt, venv = _staging_prepare_fixture(
+        tmp_path, monkeypatch
+    )
+    monkeypatch.setattr(module, "_record_upstream_observation", lambda *args, **kwargs: None)
+    commands = []
+    monkeypatch.setattr(module, "run", lambda *args, **kwargs: commands.append(args))
+    with FileLock(host / "astrbot.lock", timeout=0), pytest.raises(Timeout):
+        module.prepare(Path(module.__file__).resolve().parents[1], runtime)
+    assert commands == []
+    assert (host / "data/cmd_config.json").read_bytes() == original_config
+    assert (host / "data/memory.db").read_bytes() == b"keep-memory"
+
+
+def test_prepare_gate_rejects_a_running_host_before_recovery(tmp_path, monkeypatch):
+    from filelock import FileLock, Timeout
+
+    module, runtime, host, original_config, receipt, venv = _staging_prepare_fixture(
+        tmp_path, monkeypatch
+    )
+    recovery = []
+    monkeypatch.setattr(module, "_recover_activation", lambda *_: recovery.append(True))
+    with FileLock(runtime / "host-lifecycle.lock", timeout=0), pytest.raises(Timeout):
+        module.prepare(Path(module.__file__).resolve().parents[1], runtime)
+    assert recovery == []
+    assert (host / "data/cmd_config.json").read_bytes() == original_config
+
+
+def test_failed_windows_host_swap_rolls_back_before_releasing_gate(tmp_path, monkeypatch):
+    from filelock import FileLock, Timeout
+
+    module, runtime, host, original_config, receipt, venv = _staging_prepare_fixture(
+        tmp_path, monkeypatch
+    )
+    source = Path(module.__file__).resolve().parents[1]
+    monkeypatch.setattr(module, "_staged_verify", lambda *args, **kwargs: {})
+    monkeypatch.setattr(module, "_record_upstream_observation", lambda *args, **kwargs: None)
+    replace = Path.replace
+    recovered = []
+
+    def windows_replace(path, target):
+        target = Path(target)
+        if path == host:
+            # A held inner host lock would prevent both rename and recovery.
+            with FileLock(host / "astrbot.lock", timeout=0):
+                pass
+        if target == host:
+            with pytest.raises(Timeout):
+                FileLock(runtime / "host-lifecycle.lock", timeout=0).acquire()
+            if "staging" in path.parts:
+                raise PermissionError("synthetic Windows promotion failure")
+            recovered.append(path)
+        return replace(path, target)
+
+    monkeypatch.setattr(Path, "replace", windows_replace)
+    with pytest.raises(PermissionError, match="synthetic Windows promotion failure"):
+        module.prepare(source, runtime)
+    assert len(recovered) == 1
+    assert (host / "data/cmd_config.json").read_bytes() == original_config
+    assert (host / "data/memory.db").read_bytes() == b"keep-memory"
+    assert receipt.read_text(encoding="utf-8") == '{"format":1,"version":"0.3.0a14"}'
+    assert not (runtime / "activation.json").exists()
+    with FileLock(runtime / "host-lifecycle.lock", timeout=0):
+        pass
+
+
+def test_prepare_recovery_holds_stable_gate_without_open_host_lock(tmp_path, monkeypatch):
+    from filelock import FileLock, Timeout
+
+    module, runtime, host, original_config, receipt, venv = _staging_prepare_fixture(
+        tmp_path, monkeypatch
+    )
+    recovery = module._recover_activation
+    checkpoints = []
+
+    def recover(root):
+        with pytest.raises(Timeout):
+            FileLock(runtime / "host-lifecycle.lock", timeout=0).acquire()
+        with FileLock(host / "astrbot.lock", timeout=0):
+            pass
+        checkpoints.append("recovery")
+        return recovery(root)
+
+    monkeypatch.setattr(module, "_recover_activation", recover)
+    monkeypatch.setattr(module, "_staged_verify", lambda *args, **kwargs: {})
+    monkeypatch.setattr(module, "_post_activation_verify", lambda *args, **kwargs: {})
+    monkeypatch.setattr(module, "_record_upstream_observation", lambda *args, **kwargs: None)
+    module.prepare(Path(module.__file__).resolve().parents[1], runtime)
+    assert checkpoints == ["recovery"]
+    assert (host / "data/memory.db").read_bytes() == b"keep-memory"
+
+
+def test_rollback_entry_is_fenced_while_host_is_running_but_finalize_remains_available(
+    tmp_path, monkeypatch
+):
+    import sys
+
+    from filelock import FileLock, Timeout
+
+    module = bootstrap()
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    monkeypatch.setenv("DSWHALE_RUNTIME_DIR", str(runtime))
+    events = []
+    monkeypatch.setattr(module, "rollback_activation", lambda *_: events.append("rollback"))
+    monkeypatch.setattr(module, "_finalize_activation", lambda *_: events.append("finalize"))
+    with FileLock(runtime / "host-lifecycle.lock", timeout=0):
+        monkeypatch.setattr(sys, "argv", ["bootstrap.py", "rollback"])
+        with pytest.raises(Timeout):
+            module.main()
+        assert events == []
+        monkeypatch.setattr(sys, "argv", ["bootstrap.py", "finalize"])
+        module.main()
+    assert events == ["finalize"]
