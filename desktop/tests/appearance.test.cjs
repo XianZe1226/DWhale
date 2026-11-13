@@ -54,13 +54,13 @@ test('main and renderer use the shared contract instead of the removed 94px bar'
   const css = fs.readFileSync(path.join(root, 'desktop/ui/style.css'), 'utf8');
   assert.match(main, /windowChrome\.panelBounds/);
   assert.match(main, /browserWindowOptions\(process\.platform/);
-  assert.match(app, /page-context/);
+  assert.match(app, /window-drag/);
   assert.doesNotMatch(app, /<header class="topbar">/);
-  assert.match(css, /--header:0px/);
-  assert.match(css, /\.panel-toolbar\{height:52px/);
+  assert.match(css, /--header:\s*0px/);
+  assert.match(css, /\.panel-toolbar\s*\{\s*height:\s*52px/);
   assert.match(css, /data-material="liquid"/);
   assert.match(css, /prefers-reduced-transparency/);
-  assert.match(css, /background\.png/);
+  assert.match(css, /background:\s*radial-gradient/);
 });
 
 function renderSettings(invoke, state = {}) {
@@ -95,13 +95,13 @@ test('settings shows exactly two material cards and applies the saved choice', a
   });
   for (let i = 0; i < 12; i += 1) await app.settle();
   const html = app.html();
-  assert.match(html, /<h2>外观<\/h2>/);
+  assert.match(html, /<h2 id="appearance-title">外观<\/h2>/);
   assert.match(html, /毛玻璃/);
   assert.match(html, /液态玻璃/);
   assert.equal((html.match(/data-action="appearance-select"/g) || []).length, 2);
   assert.match(html, /data-material="liquid"[^>]*aria-checked="true"|aria-checked="true"[^>]*data-material="liquid"/);
   assert.equal(app.attrs['data-material'], 'liquid');
-  assert.match(html, /page-context/);
+  assert.doesNotMatch(html, /page-context/);
   assert.doesNotMatch(html, /class="topbar"/);
 });
 
@@ -109,18 +109,17 @@ test('R9/R10/R11: platform inset, dark reduced transparency and liquid edge opti
   const app = fs.readFileSync(path.join(root, 'desktop/ui/app.js'), 'utf8');
   const css = fs.readFileSync(path.join(root, 'desktop/ui/style.css'), 'utf8');
   const main = fs.readFileSync(path.join(root, 'desktop/main.cjs'), 'utf8');
-  assert.match(app, /String\(data\.state\.platform\?\.id \|\| ''\)\.split\('-'\)\[0\]/, 'win32-x64 normalizes to win32 for window-control geometry');
-  assert.match(css, /\[data-platform="win32"\] \.panel-toolbar\{padding-right:150px\}/);
-  assert.match(css, /\[data-platform="win32"\] \.panel-toolbar-actions\{max-width:calc\(100% - 150px\)\}/);
+  assert.match(app, /data\.state\.platform\?\.id \|\| data\.state\.chrome\?\.platform/);
+  assert.match(css, /padding-right:\s*max\(var\(--controls-inset\)/);
+  assert.match(css, /height:\s*var\(--titlebar-height\)/);
   assert.match(css, /@media \(prefers-reduced-transparency: reduce\) and \(prefers-color-scheme: dark\)/);
-  assert.ok(css.includes('background:#172233!important'), 'dark reduced-transparency keeps dark surfaces');
-  assert.ok(css.includes('color:#a9b8cd!important'), 'dark reduced-transparency keeps light body text');
-  assert.ok(css.includes('border:1.5px solid rgba(214,232,255,.55)'), 'liquid edge has a painted thickness ring');
-  assert.ok(css.includes('box-shadow:inset 0 1px 0 rgba(255,255,255,.62)'), 'liquid edge carries directional inner highlights');
-  assert.ok(css.includes('linear-gradient(135deg,rgba(255,255,255,.26)'), 'liquid edge has a controlled optical sheen');
-  assert.ok(css.includes('[data-material="liquid"] .card>*'), 'liquid text sits above the optical edge layer');
-  assert.deepEqual(chrome.titleBarOverlay(true), { color: '#1b2333', symbolColor: '#dbe6f6', height: 40 });
-  assert.deepEqual(chrome.titleBarOverlay(false), { color: '#eef3fa', symbolColor: '#475569', height: 40 });
+  assert.match(css, /--surface:\s*#1b2a3e/);
+  assert.match(css, /--muted:\s*#b1bfd3/);
+  assert.match(css, /--surface-highlight:\s*inset 0 1px 0 rgba\(255, 255, 255, \.98\)/);
+  assert.match(css, /--surface-blur:\s*9px/);
+  assert.match(css, /--surface-blur:\s*18px/);
+  assert.deepEqual(chrome.titleBarOverlay(true), { color: '#00000000', symbolColor: '#dbe6f6', height: 40 });
+  assert.deepEqual(chrome.titleBarOverlay(false), { color: '#00000000', symbolColor: '#475569', height: 40 });
   assert.match(main, /setTitleBarOverlay\(windowChrome\.titleBarOverlay\(nativeTheme\.shouldUseDarkColors\)\)/);
 
   const rgb = hex => [1, 3, 5].map(index => parseInt(hex.slice(index, index + 2), 16) / 255).map(value => value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4);
@@ -129,8 +128,8 @@ test('R9/R10/R11: platform inset, dark reduced transparency and liquid edge opti
     const values = rgb(foreground).map((_, index) => [luminance(rgb(foreground)), luminance(rgb(background))]).sort((a, b) => b - a);
     return (values[0][0] + 0.05) / (values[0][1] + 0.05);
   };
-  assert.ok(ratio('#a9b8cd', '#172233') >= 4.5, `dark reduced-transparency body contrast ${ratio('#a9b8cd', '#172233').toFixed(2)}:1`);
-  assert.ok(ratio('#e4edfb', '#172233') >= 4.5);
+  assert.ok(ratio('#b1bfd3', '#1b2a3e') >= 4.5, `dark reduced-transparency body contrast ${ratio('#b1bfd3', '#1b2a3e').toFixed(2)}:1`);
+  assert.ok(ratio('#e4edf8', '#1b2a3e') >= 4.5);
 
   const rendered = renderSettings(async action => {
     if (action === 'inspect') return { installed: true, running: false, phase: 'ready', platform: { id: 'win32-x64' }, setup: {}, appearance: { format: 1, material: 'liquid', revision: 3 } };

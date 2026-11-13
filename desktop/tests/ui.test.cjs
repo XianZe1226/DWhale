@@ -488,7 +488,7 @@ test('settings show networking before install without checking updates or enabli
   assert.match(app.html(),/更新清单.*签名|签名.*更新清单/);
   assert.match(app.html(),/系统签名|系统公证/);
   assert.equal(app.calls.some(([a])=>a.startsWith('app-update-')),false);
-  assert.deepEqual(app.calls,[['inspect',undefined],['workspace-status',undefined],['settings-get',undefined]]);
+  assert.deepEqual(app.calls,[['inspect',undefined],['workspace-status',undefined]]);
 });
 
 test('backup restore and delete require inline review and cancellation never invokes a mutation',async()=>{
@@ -712,6 +712,9 @@ test('settings page shows recent local changes and restores one field with the r
     },
   });
   await app.settle();
+  assert.equal(app.calls.some(([action]) => action === 'settings-history'), false);
+  app.toggle('settings-details', true);
+  for (let i = 0; i < 8; i++) await app.settle();
   assert.match(app.html(), /最近修改/);
   assert.match(app.html(), /升级保护检查：迁移版本 1/);
   assert.match(app.html(), /恢复主动互动/);
@@ -1053,3 +1056,21 @@ function officialSnapshotData(platforms, { bound = false, boundId = '', configur
   data.connectionTab = 'official';
   return data;
 }
+
+
+test('overview uses the initial official setup summary before loading private settings', async () => {
+  const app = renderApp({
+    screen: 'overview',
+    workspace: workspaceStatus({ official: { configured: true, protocolConnected: true } }),
+    invoke: async action => action === 'inspect' ? {
+      installed: true, running: true,
+      setup: { ownerConfigured: true, qqConfigured: true },
+      workspace: { official: { configured: true, protocolConnected: true } },
+    } : {},
+  });
+  await app.settle();
+  assert.match(app.html(), /网关已连接/);
+  assert.match(app.html(), /主人私聊<\/strong><span>已绑定/);
+  assert.doesNotMatch(app.html(), /等待完成配置/);
+  assert.equal(app.calls.some(([action]) => action === 'settings-get'), false);
+});

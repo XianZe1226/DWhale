@@ -620,7 +620,7 @@ async function createWindow() {
   updateScheduler.start();
   externalConnectionMonitor = new VisibilityMonitor({
     shouldRun: () => !shutdownRequested && !activeAction && supervisor.running,
-    read: () => officialHealthStatus(state.setup?.officialConfigured === true),
+    read: () => officialHealthStatus(state.setup?.qqConfigured === true),
     onResult: status => publishOfficialStatus(status),
   });
   externalConnectionMonitor.start(!systemSuspended && Boolean(visibleWindow()));

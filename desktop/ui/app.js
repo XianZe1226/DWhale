@@ -48,6 +48,9 @@
   let pendingFocus = null;
   let lastAnnouncement = '';
   let connectionAdvancedOpen = false;
+  let settingsDetailsOpen = false;
+  let updateOptionsOpen = false;
+  let lastViewKey = '';
   const busy = data => !!data.pending || ['checking', 'installing'].includes(data.state.phase);
   const desktop = data => data.mode === 'desktop';
   const disabled = yes => yes ? ' disabled' : '';
@@ -101,11 +104,11 @@
   }
   function connectionTimeline(data) {
     const entry = data.connections?.channels?.find(item => item.channel === 'official');
-    const configured = entry ? entry.configured === true : data.settings?.officialConfigured === true;
+    const configured = entry ? entry.configured === true : data.settings ? data.settings.officialConfigured === true : data.state.setup.qqConfigured === true;
     const targetIssue = entry?.targetIssue || '';
     const targetReady = !targetIssue && configured && entry?.platformEnabled !== false;
     const connected = targetReady && data.state.running && (data.workspace?.official && typeof data.workspace.official.protocolConnected === 'boolean' ? data.workspace.official.protocolConnected : entry?.protocolConnected === true);
-    const bound = Boolean(data.settings?.officialOwnerUMO) && targetReady;
+    const bound = (data.settings ? Boolean(data.settings.officialOwnerUMO) : data.state.setup.ownerConfigured === true) && targetReady;
     const boundDetail = targetIssue === 'missing-bound' ? '绑定失效，等待重新绑定' : bound ? '已绑定' : targetReady ? '等待复制会话 ID' : '待实例启用后绑定';
     return `<ol class="connection-timeline" aria-label="官方 QQ 连接进度">${[['官方配置',configured?'已配置':'等待完成配置',configured],['官方接口',connected?'网关已连接':targetIssue?'目标待确认':'等待连接',connected],['主人私聊',boundDetail,bound]].map(([label,detail,done])=>`<li data-state="${done?'done':'waiting'}"><span class="connection-step-marker" aria-hidden="true">${done?icon('check'):''}</span><div><strong>${label}</strong><span>${detail}</span></div></li>`).join('')}</ol>`;
   }
@@ -138,7 +141,7 @@
     const connecting=current?.stage==='downloading'&&ratio===0&&transferred===0&&cached===0?' · 正在连接下载服务器…':'';
     const bar=active||current&&['downloading','restarting','verifying','downloaded','install-ready'].includes(current.phase)?`<div class="app-update-progress" id="app-update-progress" role="group" aria-label="更新进度"><div class="update-progress-heading"><span class="spinner" aria-hidden="true"></span><strong>${esc(label)}</strong>${percent?`<span>${esc(percent)}</span>`:''}</div><progress max="1"${ratio!==null&&ratio>0?` value="${ratio}"`:''} aria-label="${esc(label)}"></progress><p>${esc(cachedNote||measured||'请保持应用打开，完成后会提示覆盖安装')}${connecting}</p></div>`:'';
     const action=ready?button(active?'正在更新…':'更新','app-update-start',{primary:true,id:'app-update-start',off:off||!data.state.installed}):update.recovery?.requiresHealthVerification?button('修复并检查环境','install',{primary:true,off:off||data.state.running}):button('检查更新','app-update-check',{id:'app-update-check',off:off||update.recovery?.servicesMustRemainStopped===true});
-    return `<section class="card reliability-card app-update-card" aria-labelledby="app-update-title"${active?' aria-busy="true"':''}><div class="reliability-heading"><div><h2 id="app-update-title">应用更新</h2><p>发现新版后点击更新。下载完成会提示覆盖安装，安装前自动备份本机数据。</p></div>${badge(phases[update.phase]||'自动检查更新',update.error?'warn':'')}</div><dl class="update-versions"><div><dt>当前版本</dt><dd>${esc(update.currentVersion||data.state.version||'待读取')}</dd></div>${ready?`<div><dt>新版本</dt><dd>${esc(update.targetVersion||'待读取')}</dd></div>`:''}</dl>${bar}${update.error?`<p class="recovery-note" role="alert">${esc(update.error.message)}</p>`:''}<div class="card-actions">${action}</div><details class="update-options"><summary>更新选项</summary><label for="app-update-channel">更新通道</label><select id="app-update-channel"${disabled(off)}><option value="stable"${channel==='stable'?' selected':''}>稳定版</option><option value="alpha"${channel==='alpha'?' selected':''}>Alpha 预览版</option></select><p>应用运行时会自动检查新版。下载使用系统网络，更新清单经签名验证、安装包校验完整性；这不替代操作系统签名或系统公证。</p></details></section>`;
+    return `<section class="card reliability-card app-update-card" aria-labelledby="app-update-title"${active?' aria-busy="true"':''}><div class="reliability-heading"><div><h2 id="app-update-title">应用更新</h2><p>发现新版后点击更新。下载完成会提示覆盖安装，安装前自动备份本机数据。</p></div>${badge(phases[update.phase]||'自动检查更新',update.error?'warn':'')}</div><dl class="update-versions"><div><dt>当前版本</dt><dd>${esc(update.currentVersion||data.state.version||'待读取')}</dd></div>${ready?`<div><dt>新版本</dt><dd>${esc(update.targetVersion||'待读取')}</dd></div>`:''}</dl>${bar}${update.error?`<p class="recovery-note" role="alert">${esc(update.error.message)}</p>`:''}<div class="card-actions">${action}</div><details id="app-update-options" class="update-options"${updateOptionsOpen ? ' open' : ''}><summary>更新选项</summary><label for="app-update-channel">更新通道</label><select id="app-update-channel"${disabled(off)}><option value="stable"${channel==='stable'?' selected':''}>稳定版</option><option value="alpha"${channel==='alpha'?' selected':''}>Alpha 预览版</option></select><p>应用运行时会自动检查新版。下载使用系统网络，更新清单经签名验证、安装包校验完整性；这不替代操作系统签名或系统公证。</p></details></section>`;
   }
   function backupCard(data) {
     const backups=Array.isArray(data.workspace.backups)?data.workspace.backups:[],off=!desktop(data)||busy(data);
@@ -182,7 +185,7 @@
       ['02', '连接你的 QQ', '配置官方机器人并绑定私聊', setup.ownerConfigured && setup.qqConfigured, 'connect', 'connect'],
       ['03', '选择模型与记忆', '连接云端模型，延续每一次对话', setup.modelConfigured, 'intelligence', 'intelligence'],
     ];
-    return `<section class="page-heading"><div><p class="eyebrow">你的专属工作空间</p><h1>概览</h1><p class="subtitle">把配置交给这里，把时间留给对话。</p></div>${button('刷新状态', 'inspect', { iconName: 'refresh', off: busy(data) || !desktop(data) })}</section>
+    return `<section class="page-heading"><div><h1>概览</h1><p class="subtitle">把配置交给这里，把时间留给对话。</p></div>${button('刷新状态', 'inspect', { iconName: 'refresh', off: busy(data) || !desktop(data) })}</section>
       <section class="hero"><div class="hero-copy">${badge(s.label, s.type)}<h2>${s.title}</h2><p>${s.description}</p>${data.state.installed?connectionTimeline(data,summary,globalChannel):''}<div class="hero-actions">${data.state.installed ? connectionPrimary(data,true,summary)+(data.state.running?serviceButton(data):'') : installButton(data)}${routeButton('查看 QQ 连接', 'connect')}</div></div><div class="whale-art" aria-hidden="true"><div class="orbit orbit-one"></div><div class="orbit orbit-two"></div><div class="whale-glow"></div><img src="dwhale-hero.png" alt=""><span class="spark spark-one">✦</span><span class="spark spark-two">✦</span><span class="bubble bubble-one"></span><span class="bubble bubble-two"></span></div></section>
       <div class="section-heading"><h2>开始使用</h2><span>三个步骤，准备好你的 DWhale</span></div>
       <div class="setup-grid">${steps.map(([num, title, desc, complete, target, glyph]) => `<button class="setup-card" data-route="${target}" type="button"><span class="card-top"><span class="tile-icon ${complete ? 'complete' : ''}">${icon(complete ? 'check' : glyph)}</span><span class="step-number">${complete ? '已完成' : num}</span></span><h3>${title}</h3><p>${desc}</p><span class="card-link">${complete ? '管理设置' : '前往设置'}${icon('arrow')}</span></button>`).join('')}</div>
@@ -197,7 +200,7 @@
   }
   function environment(data) {
     const labels = { ready: ['已就绪', 'good'], missing: ['待安装', ''], outdated: ['可升级', 'warn'], incompatible: ['需修复', 'warn'], unknown: ['待检查', ''] };
-    return `<section class="page-heading"><div><p class="eyebrow">独立环境 · 自动管理</p><h1>运行环境</h1><p class="subtitle">准备好所需工具，安心开始。</p></div>${button('重新检查', 'inspect', { iconName: 'refresh', off: busy(data) || !desktop(data) })}</section>
+    return `<section class="page-heading"><div><h1>运行环境</h1><p class="subtitle">准备好所需工具，安心开始。</p></div>${button('重新检查', 'inspect', { iconName: 'refresh', off: busy(data) || !desktop(data) })}</section>
       <section class="card environment-summary"><span class="large-tile">${icon('environment')}</span><div><h2>${data.state.installed ? '运行环境已准备' : '为 DWhale 准备独立环境'}</h2><p>兼容工具会自动复用，其余依赖安装到应用数据目录。</p><span class="system-label">${esc(data.state.platform.label || '未知系统')}</span></div>${installButton(data)}</section>
       ${data.state.platform.supported === false ? `<div class="alert error" role="alert"><strong>当前系统暂不支持</strong><p>${esc(data.state.platform.detail || '请使用受支持的系统与处理器架构。')}</p></div>` : ''}
       ${data.state.running ? '<p class="inline-note">请先停止服务，再更新或修复环境。</p>' : ''}${progress(data)}
@@ -234,11 +237,11 @@
   }
   function intelligence(data) {
     const off = !data.state.running || !desktop(data) || busy(data);
-    return `<section class="page-heading"><div><p class="eyebrow">每一次对话，都更懂你</p><h1>模型与记忆</h1><p class="subtitle">连接云端模型，让记忆自然延续。</p></div></section><div class="feature-grid"><section class="card feature-card"><span class="feature-icon lavender">${icon('intelligence')}</span>${badge(data.state.setup.modelConfigured ? '已配置' : '待配置', data.state.setup.modelConfigured ? 'good' : '')}<h2>对话模型</h2><p>在 AstrBot 中管理模型服务商、API 密钥、模型选择与对话能力。</p><ul><li>使用现有的云端模型服务</li><li>无需下载本地模型权重</li></ul>${button('配置模型', 'open-panel', { primary: true, payload: 'models', iconName: 'arrow', off })}</section><section class="card feature-card"><span class="feature-icon mint">${icon('environment')}</span>${badge(data.state.setup.memoryConfigured ? '已配置' : '待配置', data.state.setup.memoryConfigured ? 'good' : '')}<h2>长期记忆</h2><p>在记忆插件中管理检索、总结与记忆设置，让重要的细节留下来。</p><ul><li>沿用现有记忆与插件配置</li><li>在同一个窗口中完成管理</li></ul>${button('管理记忆', 'open-panel', { payload: 'memory', iconName: 'arrow', off })}</section></div>${personaCard(data)}${extensions(data)}${!data.state.running ? `<section class="info-strip">${icon('play')}<div><strong>先启动对话服务</strong><p>${data.state.installed ? '启动后，即可在当前窗口打开模型和记忆控制台。' : '请先准备运行环境，然后启动服务。'}</p></div>${data.state.installed ? serviceButton(data) : button('准备环境', 'route-environment', { primary: true, iconName: 'arrow' })}</section>` : `<section class="info-strip">${icon('shield')}<div><strong>完整配置，留在当前窗口。</strong><p>模型、插件与高级设置均通过现有 AstrBot 控制台管理。</p></div>${button('打开控制台', 'open-panel', { payload: 'astrbot', off })}</section>`}`;
+    return `<section class="page-heading"><div><h1>模型与记忆</h1><p class="subtitle">连接云端模型，让记忆自然延续。</p></div></section><div class="feature-grid"><section class="card feature-card"><span class="feature-icon lavender">${icon('intelligence')}</span>${badge(data.state.setup.modelConfigured ? '已配置' : '待配置', data.state.setup.modelConfigured ? 'good' : '')}<h2>对话模型</h2><p>在 AstrBot 中管理模型服务商、API 密钥、模型选择与对话能力。</p><ul><li>使用现有的云端模型服务</li><li>无需下载本地模型权重</li></ul>${button('配置模型', 'open-panel', { primary: true, payload: 'models', iconName: 'arrow', off })}</section><section class="card feature-card"><span class="feature-icon mint">${icon('environment')}</span>${badge(data.state.setup.memoryConfigured ? '已配置' : '待配置', data.state.setup.memoryConfigured ? 'good' : '')}<h2>长期记忆</h2><p>在记忆插件中管理检索、总结与记忆设置，让重要的细节留下来。</p><ul><li>沿用现有记忆与插件配置</li><li>在同一个窗口中完成管理</li></ul>${button('管理记忆', 'open-panel', { payload: 'memory', iconName: 'arrow', off })}</section></div>${personaCard(data)}${extensions(data)}${!data.state.running ? `<section class="info-strip">${icon('play')}<div><strong>先启动对话服务</strong><p>${data.state.installed ? '启动后，即可在当前窗口打开模型和记忆控制台。' : '请先准备运行环境，然后启动服务。'}</p></div>${data.state.installed ? serviceButton(data) : button('准备环境', 'route-environment', { primary: true, iconName: 'arrow' })}</section>` : `<section class="info-strip">${icon('shield')}<div><strong>完整配置，留在当前窗口。</strong><p>模型、插件与高级设置均通过现有 AstrBot 控制台管理。</p></div>${button('打开控制台', 'open-panel', { payload: 'astrbot', off })}</section>`}`;
   }
   function bilibili(data) {
     const value = draft || data.settings;
-    return `<section class="page-heading"><div><p class="eyebrow">发现更多感兴趣的内容</p><h1>哔哩哔哩</h1><p class="subtitle">管理关注、动态与视频相关能力。</p></div>${badge(data.state.setup.biliEnabled ? '已启用' : '未启用', data.state.setup.biliEnabled ? 'good' : '')}</section><section class="card bili-card"><span class="feature-icon pink">${icon('bilibili')}</span><h2>把喜欢的内容，带进对话。</h2><p>在完整设置面板中管理登录状态、关注与订阅规则。<br>沿用现有配置，在当前窗口继续操作。</p>${button('打开哔哩哔哩设置', 'open-panel', { primary: true, payload: 'bilibili', iconName: 'arrow', off: !desktop(data) || !data.state.running || busy(data) })}</section><section class="card preference-card"><div><h3>启用哔哩哔哩功能</h3><p>保存后生效。登录与详细订阅请在完整设置中管理。</p></div><label class="switch"><input id="biliEnabled" type="checkbox"${(value?.biliEnabled ?? data.state.setup.biliEnabled) ? ' checked' : ''}${disabled(!desktop(data) || !value || busy(data))}><span aria-hidden="true"></span><span class="sr-only">启用哔哩哔哩功能</span></label></section>${dirtyFields.size ? `<div class="form-footer"><p>有未保存的更改</p>${button('保存设置', 'save-settings', { primary: true, off: !desktop(data) || busy(data) })}</div>` : ''}${!data.state.running ? '<p class="footnote">启动服务后，可打开完整哔哩哔哩设置。</p>' : ''}${healthCard(data,true)}`;
+    return `<section class="page-heading"><div><h1>哔哩哔哩</h1><p class="subtitle">管理关注、动态与视频相关能力。</p></div>${badge(data.state.setup.biliEnabled ? '已启用' : '未启用', data.state.setup.biliEnabled ? 'good' : '')}</section><section class="card bili-card"><span class="feature-icon pink">${icon('bilibili')}</span><h2>把喜欢的内容，带进对话。</h2><p>在完整设置面板中管理登录状态、关注与订阅规则。<br>沿用现有配置，在当前窗口继续操作。</p>${button('打开哔哩哔哩设置', 'open-panel', { primary: true, payload: 'bilibili', iconName: 'arrow', off: !desktop(data) || !data.state.running || busy(data) })}</section><section class="card preference-card"><div><h3>启用哔哩哔哩功能</h3><p>保存后生效。登录与详细订阅请在完整设置中管理。</p></div><label class="switch"><input id="biliEnabled" type="checkbox"${(value?.biliEnabled ?? data.state.setup.biliEnabled) ? ' checked' : ''}${disabled(!desktop(data) || !value || busy(data))}><span aria-hidden="true"></span><span class="sr-only">启用哔哩哔哩功能</span></label></section>${dirtyFields.size ? `<div class="form-footer"><p>有未保存的更改</p>${button('保存设置', 'save-settings', { primary: true, off: !desktop(data) || busy(data) })}</div>` : ''}${!data.state.running ? '<p class="footnote">启动服务后，可打开完整哔哩哔哩设置。</p>' : ''}${healthCard(data,true)}`;
   }
   const settingLabels={
     dashboardPort:'控制台端口',
@@ -272,29 +275,73 @@
   }
   function appearanceCard(data) {
     const current = (data.appearance || data.state.appearance || {}).material === 'liquid' ? 'liquid' : 'frosted';
-    const off = !desktop(data) || busy(data);
-    const option = (id, title, copy) => `<button type="button" class="appearance-option" data-action="appearance-select" data-material="${id}" role="radio" aria-checked="${current === id}" aria-label="${title}"${off ? ' disabled' : ''}><span class="appearance-preview ${id}" aria-hidden="true"><span class="appearance-preview-card"><span class="appearance-preview-line"></span><span class="appearance-preview-line short"></span></span></span><span class="appearance-copy"><strong>${title}</strong><span>${copy}</span></span><span class="appearance-radio" aria-hidden="true">${current === id ? icon('check') : ''}</span></button>`;
-    return `<div class="section-heading"><h2>外观</h2><span>选择后立即预览并保存在本机</span></div><section class="card appearance-card" role="radiogroup" aria-label="外观材质"><p class="appearance-intro">跟随系统浅色或深色；材质只影响窗口外观，不会启动服务或修改对话设置。</p><div class="appearance-options">${option('frosted', '毛玻璃', '柔和模糊背景，文字清晰稳定。')}${option('liquid', '液态玻璃', '边缘高光与轻微折射，层次更通透。')}</div></section>`;
+    const option = (id, title, description) => `<button type="button" class="appearance-option" data-action="appearance-select" data-material="${id}" role="radio" aria-checked="${current === id}" tabindex="${current === id ? '0' : '-1'}" aria-label="${title}"${desktop(data) ? '' : ' disabled'}>
+      <span class="appearance-preview ${id}" aria-hidden="true"><span class="appearance-preview-card"><span class="appearance-preview-line"></span><span class="appearance-preview-line short"></span></span></span>
+      <span class="appearance-copy"><strong>${title}</strong><span>${description}</span></span>
+      <span class="appearance-radio" aria-hidden="true">${icon('check')}</span>
+    </button>`;
+    const message = data.appearanceError || (data.appearancePending ? '正在保存…' : '选择后自动保存');
+    return `<section class="card appearance-card" aria-labelledby="appearance-title">
+      <div class="appearance-heading"><div><h2 id="appearance-title">外观</h2><p>跟随系统深浅色</p></div><p id="appearance-state" class="appearance-state${data.appearanceError ? ' has-error' : ''}" role="status" aria-live="polite">${esc(message)}</p></div>
+      <div class="appearance-options" role="radiogroup" aria-label="外观材质">
+        ${option('frosted', '毛玻璃', '柔和、清晰')}
+        ${option('liquid', '液态玻璃', '通透、轻盈')}
+      </div>
+    </section>`;
   }
-  function pageContext(data) {
-    const label = data.state.panel ? (panelNames[data.state.panel] || '控制台') : (routeNames[route] || '概览');
-    return `<div class="page-context"><span class="page-context-path">工作空间<span class="page-context-slash">/</span><strong>${esc(label)}</strong></span><span class="page-context-status"><span class="status-dot ${data.state.running ? 'good' : ''}"></span>${esc(data.state.running ? '对话服务已启动' : '对话服务尚未启动')}${data.mode === 'preview' ? ' · 只读预览' : ''}</span></div>`;
+  function applyWindowAppearance(data) {
+    const element = document.documentElement;
+    const appearance = data.appearance || data.state.appearance || {};
+    const material = appearance.material === 'liquid' ? 'liquid' : 'frosted';
+    const platformId = String(data.state.platform?.id || data.state.chrome?.platform || '').split('-')[0];
+    if (element?.setAttribute) {
+      if (element.getAttribute?.('data-material') !== material) element.setAttribute('data-material', material);
+      if (platformId && element.getAttribute?.('data-platform') !== platformId) element.setAttribute('data-platform', platformId);
+    }
+    if (element?.style?.setProperty) {
+      const chrome = data.state.chrome || {};
+      const values = {
+        '--titlebar-height': chrome.titlebarHeight ?? (['win32', 'darwin'].includes(platformId) ? 40 : 0),
+        '--controls-inset': chrome.controlsInset ?? (platformId === 'win32' ? 150 : 0),
+        '--controls-left-inset': chrome.controlsLeftInset ?? (platformId === 'darwin' ? 80 : 0),
+      };
+      for (const [name, value] of Object.entries(values)) {
+        const size = `${Math.max(0, Math.min(200, Number(value) || 0))}px`;
+        if (element.style.getPropertyValue(name) !== size) element.style.setProperty(name, size);
+      }
+    }
+    return material;
+  }
+  function updateAppearanceControls(data, material) {
+    for (const option of root.querySelectorAll('[data-action="appearance-select"]')) {
+      const selected = option.dataset.material === material;
+      option.setAttribute('aria-checked', String(selected));
+      option.setAttribute('tabindex', selected ? '0' : '-1');
+    }
+    const message = root.querySelector('#appearance-state');
+    if (message) {
+      message.textContent = data.appearanceError || (data.appearancePending ? '正在保存…' : '选择后自动保存');
+      message.classList.toggle('has-error', Boolean(data.appearanceError));
+    }
+  }
+  function viewKey(data) {
+    const { appearance, appearancePending, appearanceError, state, ...other } = data;
+    const { appearance: committedAppearance, ...otherState } = state;
+    return JSON.stringify({ ...other, state: otherState });
   }
   function settings(data) {
     const off=!desktop(data)||busy(data);
     const settingsLoadError=data.settingsError||data.state.settingsWarning;
-    return `<section class="page-heading"><div><p class="eyebrow">你的数据，由你掌握</p><h1>应用设置</h1><p class="subtitle">管理应用更新、备份与日常运行。</p></div>${button('刷新本机状态','workspace-status',{off})}</section>
+    return `<section class="page-heading"><div><h1>应用设置</h1><p class="subtitle">管理应用更新、备份与日常运行。</p></div>${button('刷新本机状态','workspace-status',{off})}</section>
       ${settingsLoadError?`<div class="alert warning" role="status"><div><strong>设置尚未读取</strong><p>${esc(settingsLoadError)}</p></div>${button('重新读取','settings-get',{off:busy(data)})}</div>`:!data.workspaceLoaded&&!workspaceLoading?`<p class="inline-note">本机状态尚未读取。${button('重试读取','workspace-status',{off})}</p>`:''}
-      ${updateCard(data)}${appearanceCard(data)}${versionMatrix(data)}${upstreamNotice(data)}${networkCard(data)}${appPreferences(data)}${backupCard(data)}${settingsHistoryCard(data)}
+      ${updateCard(data)}${appearanceCard(data)}${appPreferences(data)}
       <div class="section-heading"><h2>本机数据</h2></div><section class="card settings-list"><div class="settings-row"><span class="tile-icon">${icon('shield')}</span><div><h3>控制台首次登录</h3><p>在系统对话框中查看或复制口令，口令不会进入此页面。</p></div>${button('首次登录口令','initial-login',{off:off||!data.state.installed})}</div><div class="settings-row"><span class="tile-icon">${icon('folder')}</span><div><h3>数据文件夹</h3><p>查看本地配置、记忆、独立环境与备份。</p></div>${button('打开文件夹','open-data',{off})}</div><div class="settings-row"><span class="tile-icon">${icon('shield')}</span><div><h3>创建数据备份</h3><p>将私人数据另存为 ZIP 备份，便于迁移与恢复。</p></div>${button(data.pending==='backup'?'正在备份…':'立即备份','backup',{off:off||!data.state.installed})}</div><div class="settings-row"><span class="tile-icon">${icon('folder')}</span><div><h3>导入数据备份</h3><p>导入自己的 DWhale ZIP 备份；操作前保留当前数据，完成后检查环境与连接。</p></div>${button(data.pending==='restore'?'正在导入…':'导入备份','restore',{off:off||!data.state.installed})}</div></section>
-      ${diagnosticsCard(data)}<div class="section-heading"><h2>关于 DWhale</h2></div><section class="card about-card"><img src="dwhale-whale.png" alt="DWhale 鲸鱼标志"><div><h2>DWhale</h2><p>让陪伴，在每一次对话中发生。</p><span class="version-text">${data.state.version?`版本 ${esc(data.state.version)}`:'桌面应用'}<span class="row-divider">·</span>${esc(data.state.platform.label||'本地工作空间')}</span></div><span class="local-label">${icon('shield')}本地工作空间</span></section>`;
+      <details id="settings-details" class="settings-details"${settingsDetailsOpen ? ' open' : ''}><summary><strong>版本与诊断</strong><span>组件版本、备份记录与故障排查</span>${icon('arrow')}</summary><div class="settings-details-content">${versionMatrix(data)}${upstreamNotice(data)}${networkCard(data)}${backupCard(data)}${settingsHistoryCard(data)}${diagnosticsCard(data)}</div></details>`;
   }
   function render(data) {
+    applyWindowAppearance(data);
     if (composing) { deferredData = data; return; }
-    const appearance = data.appearance || data.state.appearance || {};
-    const material = appearance.material === 'liquid' ? 'liquid' : 'frosted';
-    const platformId = String(data.state.platform?.id || '').split('-')[0];
-    if (document.documentElement?.setAttribute) { document.documentElement.setAttribute('data-material', material); if (platformId) document.documentElement.setAttribute('data-platform', platformId); }
+    lastViewKey = viewKey(data);
     const focused = document.activeElement?.id;
     const focusAction = document.activeElement?.dataset?.action;
     const focusPanel = document.activeElement?.dataset?.panel;
@@ -319,7 +366,7 @@
     const feedback = error ? `<div class="alert error" role="alert"><span class="alert-symbol">!</span><div><strong>操作未完成</strong><p>${esc(error)}</p></div>${settingsConflict && data.settings ? button('重新读取并保留修改', 'settings-get', { off: busy(data) || !desktop(data) }) : ''}${data.retry ? button('重试', 'retry', { off: busy(data) || !desktop(data) }) : ''}${button('关闭提示', 'dismiss-error', { off: false })}</div>` : localMessage||data.notice ? `<div class="alert success" role="status">${icon('check')}<span>${esc(localMessage||data.notice)}</span></div>` : '';
     const views = { overview, environment, connect, intelligence, bilibili, settings };
     const content = data.mode === 'unavailable' ? `<section class="desktop-notice card"><img src="dwhale-whale.png" alt="DWhale"><h1>请在桌面应用中打开</h1><p>运行环境、对话服务和本地设置需要 DWhale 桌面应用。</p><p class="footnote">当前页面未连接桌面服务，无法读取或修改本机配置。</p></section>` : views[route](data);
-    const markup = `<aside class="sidebar" aria-label="主导航"><div class="window-space"></div><div class="brand"><div class="brand-mark"><img src="dwhale-whale.png" alt=""></div><div><strong>DWhale</strong><span>你的对话伙伴</span></div></div><div class="nav-label">工作空间</div><nav>${nav}</nav><div class="sidebar-bottom"><div class="sidebar-service"><span class="status-dot ${status.type==='good'?'good':status.type==='working'?'working':''}"></span><div><strong>${esc(status.label)}</strong><span>${data.state.running ? '对话服务已启动' : '对话服务尚未启动'}</span></div></div><div class="sidebar-version"><span>DWhale Desktop</span><span>${esc(data.state.version || '')}</span></div></div></aside><div class="workspace"><div class="window-drag" aria-hidden="true"></div>${panel ? `<main class="embedded" id="main-content" tabindex="-1"><div class="panel-toolbar"><button type="button" data-action="home" class="panel-back">${icon('back')}返回${esc(routeNames[route])}</button><div class="panel-toolbar-actions"><span class="panel-context">${esc(panelNames[panel] || '控制台')}${['astrbot','models','memory','qq'].includes(panel)?'<small>内核由 DWhale 统一管理，更新请到应用设置</small>':''}</span>${button('控制台首次口令','initial-login',{off:!desktop(data)||!data.state.installed||busy(data)})}</div></div><div class="embedded-placeholder"><span class="spinner" aria-hidden="true"></span><p>正在显示控制台…</p></div>${feedback ? `<div class="panel-feedback">${feedback}</div>` : ''}${loadWarning?`<div class="panel-feedback"><div class="alert warning" role="status"><div><strong>本机状态暂不可用</strong><p>${esc(loadWarning)}</p></div></div></div>`:''}</main>` : `<main class="page" id="main-content" tabindex="-1">${pageContext(data)}${preview}${feedback}${loadWarning?`<div class="alert warning" role="status"><span class="alert-symbol">!</span><div><strong>本机状态暂不可用</strong><p>${esc(loadWarning)}</p></div>${button('重试读取','workspace-status',{off:busy(data)||!desktop(data)})}</div>`:''}${content}${route !== 'environment' ? progress(data) : ''}<footer class="page-footer"><span class="footer-line"></span><span>DWhale · 让对话更有温度</span><span class="footer-line"></span></footer></main>`}</div>`;
+    const markup = `<aside class="sidebar" aria-label="主导航"><div class="window-space"></div><div class="brand"><div class="brand-mark"><img src="dwhale-whale.png" alt=""></div><div><strong>DWhale</strong></div></div><nav>${nav}</nav><div class="sidebar-bottom"><div class="sidebar-service"><span class="status-dot ${status.type==='good'?'good':status.type==='working'?'working':''}"></span><div><strong>${esc(status.label)}</strong><span>${data.state.running ? '对话服务已启动' : '对话服务尚未启动'}</span></div></div><div class="sidebar-version"><span>DWhale Desktop</span><span>${esc(data.state.version || '')}</span></div></div></aside><div class="workspace"><div class="window-drag" aria-hidden="true"></div>${panel ? `<main class="embedded" id="main-content" tabindex="-1"><div class="panel-toolbar"><button type="button" data-action="home" class="panel-back">${icon('back')}返回${esc(routeNames[route])}</button><div class="panel-toolbar-actions"><span class="panel-context">${esc(panelNames[panel] || '控制台')}${['astrbot','models','memory','qq'].includes(panel)?'<small>内核由 DWhale 统一管理，更新请到应用设置</small>':''}</span>${button('控制台首次口令','initial-login',{off:!desktop(data)||!data.state.installed||busy(data)})}</div></div><div class="embedded-placeholder"><span class="spinner" aria-hidden="true"></span><p>正在显示控制台…</p></div>${feedback ? `<div class="panel-feedback">${feedback}</div>` : ''}${loadWarning?`<div class="panel-feedback"><div class="alert warning" role="status"><div><strong>本机状态暂不可用</strong><p>${esc(loadWarning)}</p></div></div></div>`:''}</main>` : `<main class="page" id="main-content" tabindex="-1">${preview}${feedback}${loadWarning?`<div class="alert warning" role="status"><span class="alert-symbol">!</span><div><strong>本机状态暂不可用</strong><p>${esc(loadWarning)}</p></div>${button('重试读取','workspace-status',{off:busy(data)||!desktop(data)})}</div>`:''}${content}${route !== 'environment' ? progress(data) : ''}</main>`}</div>`;
     if (markup === lastMarkup) return;
     lastMarkup = markup;
     root.innerHTML = markup;
@@ -351,7 +398,7 @@
   }
   async function ensureSettings() {
     const data = controller.get();
-    if (!['connect', 'bilibili', 'settings', 'intelligence'].includes(route) || data.settings || settingsLoading || data.mode !== 'desktop') return;
+    if (!['connect', 'bilibili', 'settings', 'intelligence'].includes(route) || route === 'settings' && !settingsDetailsOpen || data.settings || settingsLoading || data.mode !== 'desktop') return;
     settingsLoading = true; render(data);
     await run('settings-get');
     settingsLoading = false;
@@ -377,7 +424,7 @@
   }
   async function ensureSettingsHistory(force=false) {
     const data=controller.get();
-    if(route!=='settings'||settingsHistoryLoading||data.mode!=='desktop'||!data.state.installed)return;
+    if(route!=='settings'||!settingsDetailsOpen||settingsHistoryLoading||data.mode!=='desktop'||!data.state.installed)return;
     if(data.settingsHistory&&!force)return;
     settingsHistoryLoading=true;
     await run('settings-history');
@@ -495,8 +542,7 @@
     if(action==='appearance-select'){
       const material=target.dataset.material;
       if(!['frosted','liquid'].includes(material)||material===(controller.get().appearance?.material||'frosted'))return;
-      await run('appearance-save',{material});
-      render(controller.get());
+      await controller.act('appearance-save', { material }).catch(() => {});
       return;
     }
     if (action === 'save-settings') return saveSettings();
@@ -551,35 +597,34 @@
     render(controller.get());
   });
   root.addEventListener('submit', event => { if (event.target.id === 'connection-form') { event.preventDefault(); saveSettings(); } });
-  root.addEventListener('toggle', event => { if(event.target.id==='connection-advanced')connectionAdvancedOpen=event.target.open; }, true);
+  root.addEventListener('toggle', async event => {
+    if (event.target.id === 'connection-advanced') connectionAdvancedOpen = event.target.open;
+    if (event.target.id === 'app-update-options') updateOptionsOpen = event.target.open;
+    if (event.target.id === 'settings-details') {
+      settingsDetailsOpen = event.target.open;
+      if (settingsDetailsOpen) { await ensureSettings(); await ensureSettingsHistory(); }
+    }
+  }, true);
+  root.addEventListener('keydown', event => {
+    const current = event.target.closest?.('[data-action="appearance-select"]');
+    if (!current || !['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key)) return;
+    event.preventDefault();
+    const material = event.key === 'Home' ? 'frosted' : event.key === 'End' ? 'liquid' : current.dataset.material === 'frosted' ? 'liquid' : 'frosted';
+    const next = root.querySelector(`[data-action="appearance-select"][data-material="${material}"]`);
+    if (next && !next.disabled) { next.focus(); next.click(); }
+  });
   root.addEventListener('compositionstart', event => { if (event.target && event.target.closest && event.target.closest('input,textarea')) composing = true; }, true);
   root.addEventListener('compositionend', event => { if (!(event.target && event.target.closest && event.target.closest('input,textarea'))) return; composing = false; const next = deferredData; deferredData = null; render(next || controller.get()); }, true);
-  // Liquid glass catches one soft specular highlight under the pointer. This is
-  // event-driven, pointer-only and never runs while the window is idle.
-  if (typeof document !== 'undefined' && document.addEventListener && typeof requestAnimationFrame === 'function') {
-    let glassFrame = 0;
-    let glassPoint = null;
-    const glassSelector = '[data-material="liquid"] .card,[data-material="liquid"] .setup-card,[data-material="liquid"] .feature-card,[data-material="liquid"] .bili-card,[data-material="liquid"] .hero,[data-material="liquid"] .environment-summary,[data-material="liquid"] .about-card,[data-material="liquid"] .reliability-card,[data-material="liquid"] .settings-history';
-    document.addEventListener('pointermove', event => {
-      if (document.documentElement.getAttribute('data-material') !== 'liquid') return;
-      const target = event.target && event.target.closest ? event.target.closest(glassSelector) : null;
-      if (!target) return;
-      const rect = target.getBoundingClientRect();
-      if (!rect.width || !rect.height) return;
-      glassPoint = { target, x: ((event.clientX - rect.left) / rect.width) * 100, y: ((event.clientY - rect.top) / rect.height) * 100 };
-      if (glassFrame) return;
-      glassFrame = requestAnimationFrame(() => {
-        glassFrame = 0;
-        if (!glassPoint) return;
-        const point = glassPoint;
-        if (point.target.isConnected) {
-          point.target.style.setProperty('--glass-x', point.x.toFixed(1) + '%');
-          point.target.style.setProperty('--glass-y', point.y.toFixed(1) + '%');
-        }
-      });
-    }, { passive: true });
-  }
-  controller.subscribe(data => { if (data.settings) adoptSettings(data.settings); render(data); });
+  controller.subscribe(data => {
+    const key = viewKey(data);
+    if (key === lastViewKey && typeof root.querySelector === 'function') {
+      const material = applyWindowAppearance(data);
+      updateAppearanceControls(data, material);
+      return;
+    }
+    if (data.settings) adoptSettings(data.settings);
+    render(data);
+  });
   window.addEventListener('beforeunload', () => controller.dispose());
   render(controller.get());
   controller.init().catch(() => {}).then(async () => { await ensureSettings(); await ensureExtensions(); await ensureConnections(); await ensureSettingsHistory(); await ensureWorkspace(); });

@@ -1,3 +1,3 @@
 """DSWhale's host-independent companion services."""
 
-__version__ = "0.4.0a2"
+__version__ = "0.4.0a3"
