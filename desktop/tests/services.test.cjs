@@ -238,7 +238,7 @@ test('settings commands ignore a stale host package and keep configuration write
   const configFile = path.join(host, 'data/cmd_config.json');
   await fs.mkdir(path.dirname(configFile));
   await fs.writeFile(configFile, JSON.stringify({ platform: [{ type: 'aiocqhttp', enable: true }] }));
-  const manager = { host, source, python: process.env.DSWHALE_BUILD_PYTHON || (process.platform === 'win32' ? 'python' : 'python3'),
+  const manager = { host, source, python: process.env.DSWHALE_TEST_PYTHON || process.env.DSWHALE_BUILD_PYTHON || (process.platform === 'win32' ? 'python' : 'python3'),
     environment: async () => ({ ...process.env, PYTHONDONTWRITEBYTECODE: '0' }) };
   const migrated = await settingsCommand(manager, 'migrate');
   assert.notEqual(migrated.policy, 'stale-host-copy');

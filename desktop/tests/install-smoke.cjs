@@ -69,11 +69,13 @@ async function main() {
     const env = await manager.environment();
     assert.equal(env.ASTRBOT_ROOT, manager.host);
     const bridge = path.join(manager.host, 'data/plugins/astrbot_plugin_dswhale/dswhale/bili_bridge');
+    phase='installed-bridge';
     // Run the installed files, not imports from the checkout that hid the a2 defect.
     await execute(manager.python, [path.resolve(__dirname, '../../scripts/verify_artifact.py'),
       '--installed-bridge', bridge, '--node', env.DSWHALE_NODE || process.execPath],
     { cwd: directory, env, timeout: 25000, maxBuffer: 65536, windowsHide: true });
     console.log('Installed packaged bridge reached ready offline within 15 seconds and stopped.');
+    phase='installed-runtime-contracts';
     await execute(process.execPath, ['--test', path.resolve(__dirname, 'services.test.cjs')],
       { cwd: directory, env: { ...env, DSWHALE_TEST_PYTHON: manager.python }, timeout: 45000, maxBuffer: 65536, windowsHide: true });
     console.log('Pinned installed AstrBot refuses core updates in the managed host environment.');
