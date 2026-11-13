@@ -92,7 +92,7 @@ test('port preflight reports every occupied configured port without exposing con
   } finally { for (const server of servers) if (server.listening) await new Promise(resolve => server.close(resolve)); }
 });
 
-test('owned host receives desktop managed flag without changing optional session authentication', async () => {
+for (const platform of ['darwin', 'win32']) test(`owned ${platform} host uses the lifecycle gate and preserves optional session authentication`, async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'dswhale-managed-start-'));
   const portServer = net.createServer();
   await new Promise(resolve => portServer.listen(0, '127.0.0.1', resolve));
@@ -101,20 +101,31 @@ test('owned host receives desktop managed flag without changing optional session
   await fs.mkdir(path.join(root, 'data'));
   await fs.writeFile(path.join(root, 'data/cmd_config.json'), JSON.stringify({ dashboard: { host: '127.0.0.1', port } }));
   const initialEnvironment = { SYNTHETIC: 'kept', ASTRBOT_DESKTOP_SESSION_SECRET: 'synthetic inherited desktop session' };
-  let child, spawnedEnvironment, fakeServer;
+  let child, spawnedEnvironment, fakeServer, launch;
   const events = [];
   const exports = { exports: {} };
   const source = await fs.readFile(path.join(__dirname, '../lib/services.cjs'), 'utf8');
   vm.runInNewContext(source, { module: exports, require: name => name === 'node:child_process' ? { spawn(command, args, options) {
+    if (command === 'taskkill') {
+      const killer = new EventEmitter();
+      child.exitCode = 0; child.emit('exit', 0); child.emit('close', 0);
+      return killer;
+    }
+    launch = { command, args: Array.from(args), options };
     spawnedEnvironment = options.env;
     child = new EventEmitter(); child.pid = 123456789; child.exitCode = null; child.stdout = new PassThrough(); child.stderr = new PassThrough();
     fakeServer = net.createServer().listen(port, '127.0.0.1');
     child.stdout.write('synthetic private host output'); child.stderr.write('synthetic secret error');
     return child;
-  } } : require(name), process: { platform: 'darwin', kill() { child.exitCode = 0; child.emit('exit', 0); child.emit('close', 0); } }, setTimeout, clearTimeout, URL });
-  const supervisor = new exports.exports.ServiceSupervisor({ manager: { host: root, source: root, python: 'fake-python', environment: async () => initialEnvironment }, onChange: event => events.push(event) });
+  } } : require(name), process: { platform, kill() { child.exitCode = 0; child.emit('exit', 0); child.emit('close', 0); } }, setTimeout, clearTimeout, URL });
+  const runtime = path.join(root, 'synthetic-runtime');
+  const supervisor = new exports.exports.ServiceSupervisor({ manager: { host: root, source: root, runtime, python: 'fake-python', environment: async () => initialEnvironment }, onChange: event => events.push(event) });
   try {
     await supervisor.start();
+    const guardedArguments = [path.join(root, 'dswhale/host_start.py'), '--runtime', runtime];
+    assert.equal(launch.command, 'fake-python');
+    assert.deepEqual(launch.args, platform === 'win32' ? [path.join(root, 'dswhale/winjob.py'), 'fake-python', ...guardedArguments] : guardedArguments);
+    assert.equal(launch.options.cwd, root);
     assert.equal(spawnedEnvironment.ASTRBOT_DESKTOP_MANAGED, '1');
     assert.equal(spawnedEnvironment.SYNTHETIC, 'kept');
     assert.equal(spawnedEnvironment.ASTRBOT_DESKTOP_SESSION_SECRET, undefined);
