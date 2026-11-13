@@ -4,6 +4,32 @@ const fs = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
 const assert = require('node:assert/strict');
+const childProcess = require('node:child_process');
+// Hosted fixtures contain synthetic data only. Report bounded exception metadata
+// while leaving dependency output, paths, credentials and exception text private.
+if (process.env.GITHUB_ACTIONS === 'true') {
+  const spawn = childProcess.spawn;
+  childProcess.spawn = (...args) => {
+    const child = spawn(...args);
+    let pending = '';
+    child.stderr?.on('data', chunk => {
+      pending += chunk.toString('utf8');
+      for (;;) {
+        const end = pending.indexOf('\n');
+        if (end < 0) break;
+        const line = pending.slice(0, end); pending = pending.slice(end + 1);
+        if (!line.startsWith('DSWHALE_CI_DIAGNOSTIC ')) continue;
+        try {
+          const value = JSON.parse(line.slice(22));
+          if (!['install.py', 'runtime.py', 'bootstrap.py'].includes(value.file) || !/^[A-Za-z_][A-Za-z_0-9]{0,79}$/.test(value.type) || !/^[A-Za-z_][A-Za-z_0-9]{0,79}$/.test(value.function) || !Number.isSafeInteger(value.line)) continue;
+          console.error('CI setup diagnostic:', JSON.stringify({file:value.file,function:value.function,line:value.line,type:value.type,errno:Number.isSafeInteger(value.errno)?value.errno:null,winerror:Number.isSafeInteger(value.winerror)?value.winerror:null}));
+        } catch {}
+      }
+      if (pending.length > 8192) pending = '';
+    });
+    return child;
+  };
+}
 const { RuntimeManager, SetupError, runBounded } = require('../lib/runtime.cjs');
 const { takeReadToken, extensionRunner } = require('./github-access.cjs');
 const ciReadToken=takeReadToken();
@@ -21,6 +47,26 @@ async function main() {
   const stagedSource = process.env.DSWHALE_SMOKE_SOURCE || path.resolve(__dirname, '../../desktop-resources/backend');
   const manager = new RuntimeManager({ source: stagedSource, runtime,
     onProgress: event => { if (event.step) console.log(event.step); } });
+  if (process.env.GITHUB_ACTIONS === 'true') {
+    const diagnostics = path.join(directory, 'diagnostics');
+    await fs.mkdir(diagnostics);
+    await fs.writeFile(path.join(diagnostics, 'sitecustomize.py'), `import json, os, sys
+remaining = 20
+def trace(frame, event, arg):
+    global remaining
+    filename = frame.f_code.co_filename.replace('\\\\', '/')
+    if not filename.endswith(('dswhale/install.py', 'dswhale/runtime.py', 'scripts/bootstrap.py')):
+        return None
+    if event == 'exception' and remaining and issubclass(arg[0], Exception) and not issubclass(arg[0], (StopIteration, FileNotFoundError)):
+        remaining -= 1
+        error = arg[1]
+        print('DSWHALE_CI_DIAGNOSTIC ' + json.dumps({'file': filename.rsplit('/', 1)[-1], 'function': frame.f_code.co_name, 'line': frame.f_lineno, 'type': arg[0].__name__, 'errno': getattr(error, 'errno', None), 'winerror': getattr(error, 'winerror', None)}), file=sys.stderr, flush=True)
+    return trace
+sys.settrace(trace)
+`);
+    const environment = manager.environment.bind(manager);
+    manager.environment = async () => ({ ...await environment(), PYTHONPATH: diagnostics });
+  }
   // CI-only seam for external GitHub release CDN outages. The release asset is
   // still checksum-verified against tool-assets.json before this path is set.
   if (process.env.DSWHALE_CI_UV) {
