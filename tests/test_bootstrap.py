@@ -1793,3 +1793,28 @@ def test_staged_verification_respects_deferred_source_config_creation(
     else:
         module._staged_verify(source, host.parent, host, Path(sys.executable), environment)
     assert not (host / "data/cmd_config.json").exists()
+
+
+def test_relocation_preserves_windows_executables_and_rewrites_text(tmp_path):
+    module = bootstrap()
+    previous = tmp_path / "staging/long-generation-name/venv"
+    environment = tmp_path / "venv"
+    scripts = environment / "Scripts"
+    scripts.mkdir(parents=True)
+    executable = scripts / "dswhale.exe"
+    binary = b"MZ\x00\x01" + str(previous).encode("utf-8") + b"\x00launcher-offsets"
+    executable.write_bytes(binary)
+    activation = scripts / "activate.bat"
+    activation.write_text(str(previous), encoding="utf-8")
+    module._rewrite_venv_paths(environment, previous)
+    assert executable.read_bytes() == binary
+    assert activation.read_text(encoding="utf-8") == str(environment)
+
+
+def test_staged_venv_requests_supported_relocatable_entrypoints(tmp_path, monkeypatch):
+    module, runtime, commands = fake_bootstrap_entry(tmp_path, monkeypatch, desktop=False)
+    monkeypatch.setattr(module, "_post_activation_verify", lambda *args: {})
+    module.main()
+    creation = [command for command in commands if "venv" in command]
+    assert creation
+    assert all("--relocatable" in command for command in creation)

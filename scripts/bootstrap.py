@@ -629,7 +629,7 @@ def rollback_activation(runtime):
 
 
 def _rewrite_venv_paths(environment, old_environment):
-    """Make relocated console-script shebangs point at the live environment."""
+    """Adjust text activation scripts without changing binary launcher offsets."""
     old = str(old_environment).encode("utf-8")
     new = str(environment).encode("utf-8")
     if old == new:
@@ -639,11 +639,18 @@ def _rewrite_venv_paths(environment, old_environment):
         if not root.is_dir():
             continue
         for path in root.iterdir():
-            if not path.is_file() or path.is_symlink() or path.stat().st_size > 1024**2:
+            if (
+                not path.is_file()
+                or path.is_symlink()
+                or path.suffix.lower() in {".exe", ".dll", ".pyd", ".so", ".dylib"}
+                or path.stat().st_size > 1024**2
+            ):
                 continue
             try:
                 data = path.read_bytes()
             except OSError:
+                continue
+            if b"\0" in data or data.startswith(b"MZ"):
                 continue
             if old in data:
                 path.write_bytes(data.replace(old, new))
@@ -909,7 +916,10 @@ def _prepare(source, runtime):
                 except (OSError, subprocess.SubprocessError):
                     pass
             if not compatible:
-                run([uv, "venv", "--python", "3.12", "--clear", staging_venv], env=staging_env)
+                run(
+                    [uv, "venv", "--relocatable", "--python", "3.12", "--clear", staging_venv],
+                    env=staging_env,
+                )
             progress("dependencies", 0.28)
             cache = runtime / "cache"
             cache.mkdir(parents=True, exist_ok=True)
