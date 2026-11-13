@@ -56,7 +56,7 @@ remaining = 20
 def trace(frame, event, arg):
     global remaining
     filename = frame.f_code.co_filename.replace('\\\\', '/')
-    if not filename.endswith(('dswhale/install.py', 'dswhale/runtime.py', 'scripts/bootstrap.py')):
+    if frame.f_code.co_name == '_fsync_directory' or not filename.endswith(('dswhale/install.py', 'dswhale/runtime.py', 'scripts/bootstrap.py')):
         return None
     if event == 'exception' and remaining and issubclass(arg[0], Exception) and not issubclass(arg[0], (StopIteration, FileNotFoundError)):
         remaining -= 1

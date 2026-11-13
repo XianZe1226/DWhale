@@ -1,0 +1,32 @@
+name: Windows runtime verification
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  install:
+    runs-on: windows-2022
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.23.4'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install staging dependencies
+        run: python -m pip install "httpx>=0.28,<0.29" "filelock>=3.17"
+      - name: Stage public backend
+        run: python -m scripts.stage_desktop
+      - name: Seed checksum-verified installer tool
+        run: python scripts/ci_seed_uv.py ci-tools
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+      - name: Verify fresh and repeated synthetic installation
+        run: node desktop/tests/install-smoke.cjs
+        env:
+          DSWHALE_SMOKE_GITHUB_TOKEN: ${{ github.token }}
