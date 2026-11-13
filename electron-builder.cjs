@@ -40,6 +40,7 @@ const config = {
     "desktop/lib/security.cjs",
     "desktop/lib/official-connection.cjs",
     "desktop/lib/status-cache.cjs",
+    "desktop/lib/visibility-monitor.cjs",
     "desktop/lib/services.cjs",
     "desktop/lib/extensions.cjs",
     "desktop/lib/app-updater.cjs",

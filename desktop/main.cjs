@@ -6,6 +6,7 @@ const fs = require('node:fs/promises');
 const { pathToFileURL, URL } = require('node:url');
 const { spawn } = require('node:child_process');
 const crypto = require('node:crypto');
+const { isDeepStrictEqual } = require('node:util');
 const { RuntimeManager, SetupError, runBounded } = require('./lib/runtime.cjs');
 const { validateRequest, permittedNavigation, biliURL, consolePopupTarget } = require('./lib/security.cjs');
 const officialConnection = require('./lib/official-connection.cjs');
@@ -22,8 +23,9 @@ const { Preferences, PreferencesError } = require('./lib/preferences.cjs');
 const { DiagnosticsError } = require('./lib/diagnostics.cjs');
 const { readNetworkConfig, createElectronTransport, systemProxyURL, NetworkError } = require('./lib/network.cjs');
 const { StatusCache } = require('./lib/status-cache.cjs');
+const { VisibilityMonitor } = require('./lib/visibility-monitor.cjs');
 const windowChrome = require('./lib/window-chrome.cjs');
-const { Appearance } = require('./lib/appearance.cjs');
+const { Appearance, AppearanceError } = require('./lib/appearance.cjs');
 const branding = require('./lib/branding.cjs');
 const macMigration = require('./lib/mac-migration.cjs');
 class UserActionError extends Error {}
@@ -36,12 +38,32 @@ if (process.platform === 'win32') app.setAppUserModelId('dev.dswhale.desktop');
 protocol.registerSchemesAsPrivileged([{ scheme: 'dswhale', privileges: { standard: true, secure: true, supportFetchAPI: true } }]);
 let operations, appUpdater, updateScheduler, workspace, preferenceStore, appearanceStore, tray, preferences = {tray:false,startAtLogin:false,resumeAfterWake:false}, installerHandedOff = false, installerExitScheduled = false;
 let window, panelView, panelKey = '', panelGeneration = 0, panelAttached = false, manager, supervisor, extensions, quitting = false, shutdownRequested = false, activeAction, startupInProgress = false, startupOperation, externalConnectionMonitor;
+let systemSuspended = false, stateDeliveryPending = false;
 const activeCommands = new Set();
 const statusCache = new StatusCache({ ttl: 2500 });
 const READ_ONLY_ACTIONS = new Set(['inspect', 'home', 'settings-get', 'workspace-status', 'backup-list', 'extensions-status', 'connections-status', 'settings-history', 'reply-style-preview', 'appearance-get']);
 const CONCURRENT_READ_ACTIONS = new Set(['settings-get', 'workspace-status', 'backup-list', 'connections-status', 'settings-history', 'reply-style-preview', 'appearance-get']);
 let state = { version: app.getVersion(), platform: { id: '', label: '本机', supported: true, detail: '' }, chrome: windowChrome.chromeFor(process.platform), appearance: { format: 1, material: 'frosted', revision: 0 }, phase: 'idle', installed: false, running: false, components: [], setup: { ownerConfigured: false, qqConfigured: false, modelConfigured: false, memoryConfigured: false, biliEnabled: false } };
-function publish(patch = {}) { state = { ...state, ...patch }; if (window && !window.isDestroyed()) window.webContents.send('dswhale:state', state); return state; }
+function visibleWindow() {
+  return window && !window.isDestroyed() && window.isVisible?.() !== false && window.isMinimized?.() !== true;
+}
+function deliverState() {
+  if (shutdownRequested || systemSuspended || !visibleWindow()) { stateDeliveryPending = true; return; }
+  window.webContents.send('dswhale:state', state);
+  stateDeliveryPending = false;
+}
+function publish(patch = {}) {
+  if (!Object.keys(patch).some(key => !Object.hasOwn(state, key) || !isDeepStrictEqual(state[key], patch[key]))) return state;
+  state = { ...state, ...patch };
+  deliverState();
+  return state;
+}
+function syncConnectionMonitor(refreshNow = false) {
+  const active = !shutdownRequested && !systemSuspended && Boolean(visibleWindow());
+  externalConnectionMonitor?.setActive(active);
+  if (active && stateDeliveryPending) deliverState();
+  if (active && refreshNow) void externalConnectionMonitor?.refresh();
+}
 function platformTarget(platforms, type, boundId) {
   const candidates = Array.isArray(platforms) ? platforms.filter(item => item && item.type === type) : [];
   if (boundId) {
@@ -454,12 +476,13 @@ async function perform(action, payload) {
   }
 }
 async function reportActionError(error, action) {
-  const safe=error instanceof UserActionError||error instanceof UpdateError||error instanceof NetworkError||error instanceof SetupError||error instanceof PreferencesError||error instanceof DiagnosticsError||error?.code==='PORT-001';
+  const safe=error instanceof UserActionError||error instanceof UpdateError||error instanceof NetworkError||error instanceof SetupError||error instanceof PreferencesError||error instanceof DiagnosticsError||error instanceof AppearanceError||error?.code==='PORT-001';
   const code=error instanceof UpdateError?'UPD-001':error instanceof NetworkError?'NET-001':error?.code==='PORT-001'?'PORT-001':'APP-001';
   const message=`[${code}] ${safe?error.message:'操作未完成，请重新检查状态或导出诊断'}`;
   // Reporting must never replace the user-facing action error: the event log or
   // the operations object may be unavailable during an early failure.
   try { await operations?.events?.write({component:error instanceof UpdateError?'update':'app',action:['start','stop','install','restore'].includes(action)?action:'check',code}); } catch {}
+  if (action === 'appearance-save' || action === 'appearance-get') return message;
   const feedback={kind:READ_ONLY_ACTIONS.has(action)?'warning':'error',scope:READ_ONLY_ACTIONS.has(action)?(action==='settings-get'?'settings':'workspace'):'action',code,message,retryable:true,active:true,operationId:crypto.randomBytes(8).toString('hex')};
   if(READ_ONLY_ACTIONS.has(action)){
     const patch=action==='settings-get'?{settingsWarning:message}:{workspaceWarning:message};
@@ -531,7 +554,7 @@ async function createWindow() {
   const transport=createElectronTransport(downloadSession);
   manager = new RuntimeManager({ source, runtime: path.join(app.getPath('userData'), 'runtime'), fetch:transport,proxyResolver:()=>systemProxyURL(downloadSession),onProgress: patch => publish(patch) });
   extensions = new ExtensionRunner(manager);
-  supervisor = new ServiceSupervisor({ manager, onChange: patch => { if (!patch.running && panelView) closePanel(); publish(patch); } });
+  supervisor = new ServiceSupervisor({ manager, onChange: patch => { if (!patch.running && panelView) closePanel(); publish(patch); syncConnectionMonitor(true); } });
   // Runtime activation is committed by bootstrap.prepare() after its staged
   // post-activation verification, before the install action returns. A later
   // cold-start failure (for example a busy port) must not roll the host back:
@@ -557,7 +580,7 @@ async function createWindow() {
   for(const name of ['persist:dswhale-consoles','persist:dswhale-bili-console']){const consoleSession=session.fromPartition(name);consoleSession.setPermissionRequestHandler((_contents,_permission,callback)=>callback(false));consoleSession.setPermissionCheckHandler(()=>false);}
   session.defaultSession.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
   session.defaultSession.setPermissionCheckHandler(() => false);
-  window = new BrowserWindow({ width: 1220, height: 850, minWidth: windowChrome.MIN_WIDTH, minHeight: windowChrome.MIN_HEIGHT, ...windowChrome.browserWindowOptions(process.platform, os.release()), title: 'DWhale', backgroundColor: '#e9eef7', icon: path.join(__dirname, 'assets/icon.png'), webPreferences: { preload: path.join(__dirname, 'preload.cjs'), sandbox: true, contextIsolation: true, nodeIntegration: false, webSecurity: true } });
+  window = new BrowserWindow({ width: 1220, height: 850, useContentSize: true, minWidth: windowChrome.MIN_WIDTH, minHeight: windowChrome.MIN_HEIGHT, ...windowChrome.browserWindowOptions(process.platform, os.release(), nativeTheme.shouldUseDarkColors), title: 'DWhale', backgroundColor: '#e9eef7', icon: path.join(__dirname, 'assets/icon.png'), webPreferences: { preload: path.join(__dirname, 'preload.cjs'), sandbox: true, contextIsolation: true, nodeIntegration: false, webSecurity: true } });
   window.setMenuBarVisibility(false);
   window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   window.webContents.on('will-navigate', event => event.preventDefault());
@@ -595,13 +618,25 @@ async function createWindow() {
     onResult:appUpdate=>publish({appUpdate}),
   });
   updateScheduler.start();
-  externalConnectionMonitor = setInterval(() => {
-    if (shutdownRequested || activeAction || !supervisor.running) return;
-    officialHealthStatus(state.setup?.officialConfigured === true).then(status => publishOfficialStatus(status)).catch(() => {});
-  }, 5000);
-  externalConnectionMonitor.unref?.();
-  let wasRunning=false;powerMonitor.on('suspend',()=>{wasRunning=supervisor.running;});powerMonitor.on('resume',()=>{if(shutdownRequested)return;updateScheduler?.resume();if(preferences.resumeAfterWake&&wasRunning&&!supervisor.running&&!activeAction)perform('start').catch(()=>publish({error:'系统已唤醒，请重新检查连接'}));else publish({notice:'系统已唤醒，可重新检查连接状态'});});
-  window.on('closed', () => { window = null; });
+  externalConnectionMonitor = new VisibilityMonitor({
+    shouldRun: () => !shutdownRequested && !activeAction && supervisor.running,
+    read: () => officialHealthStatus(state.setup?.officialConfigured === true),
+    onResult: status => publishOfficialStatus(status),
+  });
+  externalConnectionMonitor.start(!systemSuspended && Boolean(visibleWindow()));
+  for (const event of ['show', 'restore', 'focus']) window.on(event, () => syncConnectionMonitor(true));
+  for (const event of ['hide', 'minimize']) window.on(event, () => syncConnectionMonitor());
+  let wasRunning = false;
+  powerMonitor.on('suspend', () => { wasRunning = supervisor.running; systemSuspended = true; syncConnectionMonitor(); });
+  powerMonitor.on('resume', () => {
+    if (shutdownRequested) return;
+    systemSuspended = false;
+    updateScheduler?.resume();
+    syncConnectionMonitor(true);
+    if (preferences.resumeAfterWake && wasRunning && !supervisor.running && !activeAction) perform('start').catch(() => publish({ error: '系统已唤醒，请重新检查连接' }));
+    else publish({ notice: '系统已唤醒，可重新检查连接状态' });
+  });
+  window.on('closed', () => { externalConnectionMonitor?.stop(); window = null; });
 }
 if (!app.requestSingleInstanceLock()) app.quit();
 else {
@@ -623,7 +658,7 @@ else {
     event.preventDefault();
     if (shutdownRequested) return;
     shutdownRequested = true;
-    clearInterval(externalConnectionMonitor);
+    externalConnectionMonitor?.stop();
     updateScheduler?.stop();
     for (const child of activeCommands) child.kill();
     Promise.resolve().then(async()=>{for(const close of [()=>appUpdater?.cancel(),()=>operations?.close(),()=>extensions?.close(),()=>manager?.cancel(),()=>supervisor?.stop(),()=>startupOperation?.catch(()=>{}),()=>stopAll(),()=>statusCache.close()]){try{await close();}catch{}}}).finally(()=>{quitting=true;app.quit();});
