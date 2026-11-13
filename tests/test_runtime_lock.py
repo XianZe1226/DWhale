@@ -25,7 +25,7 @@ def test_default_path_prefers_checkout_then_bundled(tmp_path):
 def test_lock_and_dependency_constraints_agree():
     import tomllib
 
-    project = tomllib.loads((ROOT / "pyproject.toml").read_text())
+    project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     locked = runtime_lock.load()["runtime"]["astrbot"]
     for group in ("host", "dev"):
         pin = next(
@@ -34,6 +34,6 @@ def test_lock_and_dependency_constraints_agree():
             if requirement.startswith("astrbot==")
         )
         assert pin == f"astrbot=={locked}"
-    runtime_source = (ROOT / "desktop/lib/runtime.cjs").read_text()
+    runtime_source = (ROOT / "desktop/lib/runtime.cjs").read_text(encoding="utf-8")
     assert "runtimeLockModule.KEY" in runtime_source
     assert "lock?.runtime" in runtime_source
