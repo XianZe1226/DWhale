@@ -139,7 +139,7 @@ class ServiceSupervisor {
     // This application uses its existing dashboard login, not another launcher's session.
     delete environment.ASTRBOT_DESKTOP_SESSION_SECRET;
     this._active(generation);
-    const child = spawn(python, args, { cwd: this.manager.host, env: environment, windowsHide: true, detached: process.platform !== 'win32', stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(python, args, { cwd: this.manager.source, env: environment, windowsHide: true, detached: process.platform !== 'win32', stdio: ['ignore', 'pipe', 'pipe'] });
     this.child = child; this.stopped = false; this.startedAt = Date.now();
     // Do not forward raw host logs: messages, account data and service keys may appear there.
     child.stdout.resume(); child.stderr.resume();

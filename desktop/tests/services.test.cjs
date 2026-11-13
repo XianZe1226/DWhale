@@ -119,13 +119,14 @@ for (const platform of ['darwin', 'win32']) test(`owned ${platform} host uses th
     return child;
   } } : require(name), process: { platform, kill() { child.exitCode = 0; child.emit('exit', 0); child.emit('close', 0); } }, setTimeout, clearTimeout, URL });
   const runtime = path.join(root, 'synthetic-runtime');
-  const supervisor = new exports.exports.ServiceSupervisor({ manager: { host: root, source: root, runtime, python: 'fake-python', environment: async () => initialEnvironment }, onChange: event => events.push(event) });
+  const bundle = path.join(root, 'synthetic-bundle');
+  const supervisor = new exports.exports.ServiceSupervisor({ manager: { host: root, source: bundle, runtime, python: 'fake-python', environment: async () => initialEnvironment }, onChange: event => events.push(event) });
   try {
     await supervisor.start();
-    const guardedArguments = [path.join(root, 'dswhale/host_start.py'), '--runtime', runtime];
+    const guardedArguments = [path.join(bundle, 'dswhale/host_start.py'), '--runtime', runtime];
     assert.equal(launch.command, 'fake-python');
-    assert.deepEqual(launch.args, platform === 'win32' ? [path.join(root, 'dswhale/winjob.py'), 'fake-python', ...guardedArguments] : guardedArguments);
-    assert.equal(launch.options.cwd, root);
+    assert.deepEqual(launch.args, platform === 'win32' ? [path.join(bundle, 'dswhale/winjob.py'), 'fake-python', ...guardedArguments] : guardedArguments);
+    assert.equal(launch.options.cwd, bundle);
     assert.equal(spawnedEnvironment.ASTRBOT_DESKTOP_MANAGED, '1');
     assert.equal(spawnedEnvironment.SYNTHETIC, 'kept');
     assert.equal(spawnedEnvironment.ASTRBOT_DESKTOP_SESSION_SECRET, undefined);
