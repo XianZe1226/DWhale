@@ -580,7 +580,7 @@ async function createWindow() {
   for(const name of ['persist:dswhale-consoles','persist:dswhale-bili-console']){const consoleSession=session.fromPartition(name);consoleSession.setPermissionRequestHandler((_contents,_permission,callback)=>callback(false));consoleSession.setPermissionCheckHandler(()=>false);}
   session.defaultSession.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
   session.defaultSession.setPermissionCheckHandler(() => false);
-  window = new BrowserWindow({ width: 1220, height: 850, useContentSize: true, minWidth: windowChrome.MIN_WIDTH, minHeight: windowChrome.MIN_HEIGHT, ...windowChrome.browserWindowOptions(process.platform, os.release(), nativeTheme.shouldUseDarkColors), title: 'DWhale', backgroundColor: '#e9eef7', icon: path.join(__dirname, 'assets/icon.png'), webPreferences: { preload: path.join(__dirname, 'preload.cjs'), sandbox: true, contextIsolation: true, nodeIntegration: false, webSecurity: true } });
+  window = new BrowserWindow({ width: 1220, height: 850, useContentSize: true, minWidth: windowChrome.MIN_WIDTH, minHeight: windowChrome.MIN_HEIGHT, ...windowChrome.browserWindowOptions(process.platform, os.release(), nativeTheme.shouldUseDarkColors), title: 'DWhale', backgroundColor: nativeTheme.shouldUseDarkColors ? '#111b29' : '#eef3f8', icon: path.join(__dirname, 'assets/icon.png'), webPreferences: { preload: path.join(__dirname, 'preload.cjs'), sandbox: true, contextIsolation: true, nodeIntegration: false, webSecurity: true } });
   window.setMenuBarVisibility(false);
   window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   window.webContents.on('will-navigate', event => event.preventDefault());

@@ -10,7 +10,7 @@ const { createRequire } = require('node:module');
 const chrome = require('../lib/window-chrome.cjs');
 const { AppearanceError } = require('../lib/appearance.cjs');
 
-function mainHarness({ openWindow = false } = {}) {
+function mainHarness({ openWindow = false, dark = true } = {}) {
   const file = path.resolve(__dirname, '../main.cjs');
   const native = createRequire(file);
   const messages = [];
@@ -33,7 +33,7 @@ function mainHarness({ openWindow = false } = {}) {
     app: { setName() {}, setAppUserModelId() {}, setPath() {}, getPath: name => path.join(require('node:os').tmpdir(), 'dwhale-synthetic-window', name), getVersion: () => '0.4.0-alpha.2', requestSingleInstanceLock: () => false, quit() {} },
     protocol: { registerSchemesAsPrivileged() {} },
     powerMonitor, ipcMain: { handle() {} },
-    nativeTheme: { shouldUseDarkColors: true },
+    nativeTheme: { shouldUseDarkColors: dark },
     session: {
       fromPartition: () => ({ setProxy() {}, fetch() { throw Error('unexpected request'); }, setPermissionRequestHandler() {}, setPermissionCheckHandler() {} }),
       defaultSession: { setPermissionRequestHandler() {}, setPermissionCheckHandler() {} },
@@ -102,8 +102,16 @@ test('window construction uses the page content size and initial system theme fo
   assert.equal(options.useContentSize, true, 'native frame dimensions cannot shrink the initial page below the sidebar breakpoint');
   assert.equal(options.titleBarOverlay.symbolColor, '#dbe6f6');
   assert.equal(options.titleBarOverlay.color, '#00000000');
+  assert.equal(options.backgroundColor, '#111b29');
   assert.equal(options.webPreferences.sandbox, true);
   assert.equal(options.webPreferences.contextIsolation, true);
+});
+
+test('light windows start with the matching light canvas beneath transparent native controls', async () => {
+  const h = mainHarness({ dark: false });
+  await assert.rejects(h.createWindow(), /captured window options/);
+  assert.equal(h.options().backgroundColor, '#eef3f8');
+  assert.equal(h.options().titleBarOverlay.symbolColor, '#475569');
 });
 
 test('the packaged main process includes its visibility monitor dependency', () => {
