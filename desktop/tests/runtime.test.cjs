@@ -1,0 +1,384 @@
+'use strict';
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs/promises');
+const path = require('node:path');
+const os = require('node:os');
+let runtime;
+try { runtime = require('../lib/runtime.cjs'); } catch { runtime = {}; }
+
+test('desktop accepts only supported native architectures and minimum OS', () => {
+  assert.equal(typeof runtime.platformInfo, 'function');
+  assert.equal(runtime.platformInfo('darwin', 'arm64', '22.0.0').supported, true);
+  assert.equal(runtime.platformInfo('darwin', 'x64', '24.0.0').supported, false);
+  assert.equal(runtime.platformInfo('darwin', 'arm64', '21.0.0').supported, false);
+  assert.equal(runtime.platformInfo('win32', 'x64', '10.0.19045').supported, true);
+  assert.equal(runtime.platformInfo('win32', 'x64', '10.0.19044').supported, false);
+  assert.equal(runtime.platformInfo('linux', 'x64', '6.8', {ID:'ubuntu', VERSION_ID:'24.04'}).supported, true);
+  assert.equal(runtime.platformInfo('linux', 'arm64', '6.8', {ID:'ubuntu', VERSION_ID:'24.04'}).supported, false);
+  assert.equal(runtime.platformInfo('linux', 'x64', '6.8', {ID:'debian', VERSION_ID:'12'}).supported, false);
+});
+
+test('compatible runtimes reject wrong majors, prereleases and malformed output', () => {
+  assert.equal(typeof runtime.compatibleVersion, 'function');
+  for (const [tool, value, wanted] of [
+    ['uv','uv 0.13.5 (46776a95d 2026-10-21 aarch64-apple-darwin)',true],
+    ['uv','uv 0.13.4',false], ['uv','uv 0.13.5rc1',false],
+    ['python','Python 3.12.15',true], ['python','Python 3.13.0',false],
+    ['python','Python 3.12.0rc1',false], ['node','v22.23.4',true],
+    ['node','v22.0.0',false], ['node','v22.23.3',false], ['node','v22.23.5',true],
+    ['node','v22.24.0',true], ['node','v24.0.0',false], ['ffmpeg','ffmpeg version 6.1.1 Copyright',true],
+    ['ffprobe','ffprobe version 9.0.2-static Copyright',true],
+    ['ffmpeg','ffmpeg version N-12345',false], ['ffprobe','ffprobe version 5.1',false],
+  ]) assert.equal(runtime.compatibleVersion(tool,value),wanted, `${tool} ${value}`);
+});
+
+test('verified downloads enforce HTTPS, checksum and streamed size limits', async () => {
+  assert.equal(typeof runtime.downloadVerified, 'function');
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(),'dswhale-download-'));
+  const file=path.join(dir,'asset');
+  const fake = async () => new Response(Buffer.from('abc'));
+  try {
+    await assert.rejects(runtime.downloadVerified({url:'http://bad.test/x',sha256:'0'.repeat(64)},file,{fetch:fake}), /HTTPS/);
+    await assert.rejects(runtime.downloadVerified({url:'https://ok.test/x',sha256:'0'.repeat(64)},file,{fetch:fake}), /校验|checksum/);
+    await assert.rejects(runtime.downloadVerified({url:'https://ok.test/x',sha256:'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad'},file,{fetch:fake,maxBytes:2}), /大小|size/);
+    await assert.rejects(fs.access(file));
+    await runtime.downloadVerified({url:'https://ok.test/x',sha256:'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad'},file,{fetch:fake});
+    assert.equal(await fs.readFile(file,'utf8'),'abc');
+  } finally { await fs.rm(dir,{recursive:true,force:true}); }
+});
+
+test('verified downloads resume with real Range bytes and restart explicitly when Range is ignored', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(),'dswhale-resume-'));
+  const file=path.join(dir,'asset');
+  const partial=`${file}.part`;
+  const full=Buffer.from('abcdefgh');
+  const sha=require('node:crypto').createHash('sha256').update(full).digest('hex');
+  try {
+    await fs.writeFile(partial,Buffer.from('abcd'));
+    const ranges=[];
+    const progress=[];
+    const resumed=async (url,{headers})=>{
+      ranges.push(headers.Range);
+      return new Response(Buffer.from('efgh'),{status:206,headers:{'content-range':'bytes 4-7/8','content-length':'4'}});
+    };
+    await runtime.downloadVerified({url:'https://ok.test/x',sha256:sha},file,{fetch:resumed,onProgress:(ratio,value)=>progress.push({ratio,...value})});
+    assert.equal(ranges[0],'bytes=4-');
+    assert.equal(await fs.readFile(file,'utf8'),'abcdefgh');
+    const last=progress.at(-1);
+    assert.equal(last.transferredBytes,4);
+    assert.equal(last.cachedBytes,4);
+    assert.equal(last.receivedBytes,8);
+    assert.equal(last.ratio,1);
+    await assert.rejects(fs.access(partial));
+
+    await fs.writeFile(partial,Buffer.from('abcd'));
+    const restarted=[];
+    const ignored=async ()=>new Response(full,{status:200,headers:{'content-length':'8'}});
+    await runtime.downloadVerified({url:'https://ok.test/x',sha256:sha},file,{fetch:ignored,onProgress:(ratio,value)=>restarted.push({ratio,...value})});
+    assert.equal(restarted[0].restarting,true);
+    assert.equal(restarted[0].transferredBytes,0);
+    assert.equal(restarted[0].cachedBytes,4);
+    assert.equal(restarted[0].ratio,null);
+    const done=restarted.at(-1);
+    assert.equal(done.transferredBytes,8);
+    assert.equal(done.cachedBytes,0);
+    assert.equal(done.ratio,1);
+    assert.equal(await fs.readFile(file,'utf8'),'abcdefgh');
+  } finally { await fs.rm(dir,{recursive:true,force:true}); }
+});
+
+test('Windows UV extraction passes Unicode paths as data instead of tar arguments', async () => {
+  assert.equal(typeof runtime.extractUVArchive, 'function');
+  const archive = "C:\\Users\\synthetic\\鱼 '$ env\\uv.zip";
+  const staged = "C:\\Users\\synthetic\\鱼 '$ env\\uv.exe";
+  const calls = [];
+  await runtime.extractUVArchive(archive, staged, 'uv.exe', { platform: 'win32', runner: async (...args) => { calls.push(args); return Buffer.alloc(0); } });
+  assert.equal(calls.length, 1);
+  const [command, args, options] = calls[0];
+  assert.match(command, /powershell\.exe$/i);
+  assert.equal(options.env.DSWHALE_UV_ARCHIVE, archive);
+  assert.equal(options.env.DSWHALE_UV_OUTPUT, staged);
+  const script = Buffer.from(args.at(-1), 'base64').toString('utf16le');
+  assert.match(script, /System\.IO\.Compression\.ZipFile/);
+  assert.ok(!script.includes(archive));
+  assert.ok(!args.includes(archive));
+});
+
+test('installer locks are exclusive and released without exposing subprocess output', async () => {
+  assert.equal(typeof runtime.withInstallLock, 'function');
+  const dir=await fs.mkdtemp(path.join(os.tmpdir(),'dswhale-lock-'));
+  let release;
+  const blocked=new Promise(resolve=>{release=resolve;});
+  try {
+    const first=runtime.withInstallLock(dir,async()=>{await blocked; throw new Error('failure');});
+    await new Promise(resolve=>setTimeout(resolve,30));
+    await assert.rejects(runtime.withInstallLock(dir,async()=>{}),/正在|already/);
+    release();
+    await assert.rejects(first,/failure/);
+    await runtime.withInstallLock(dir,async()=>fs.writeFile(path.join(dir,'success'),'yes'));
+    assert.equal(await fs.readFile(path.join(dir,'success'),'utf8'),'yes');
+  } finally {release(); await fs.rm(dir,{recursive:true,force:true});}
+});
+
+test('environment uses external runtime data and rejects malformed saved tools', async () => {
+  assert.equal(typeof runtime.RuntimeManager,'function');
+  const dir=await fs.mkdtemp(path.join(os.tmpdir(),'dswhale-env-'));
+  try {
+    await fs.writeFile(path.join(dir,'tool-env.json'),JSON.stringify({node:'/private/tools/node',ffmpeg:'/private/media/ffmpeg',ffprobe:'/private/media/ffprobe',other:'SECRET'}));
+    const manager=new runtime.RuntimeManager({source:'/installed/backend',runtime:dir});
+    const env=await manager.environment();
+    assert.equal(env.ASTRBOT_ROOT,path.join(dir,'astrbot'));
+    assert.equal(env.DSWHALE_RUNTIME_DIR,dir);
+    assert.equal(env.DSWHALE_NODE,'/private/tools/node');
+    assert.equal(env.PYTHONUTF8,'1');
+    assert.equal(env.PATH.split(path.delimiter)[0],'/private/tools');
+    assert.ok(!env.PATH.includes('SECRET'));
+    await fs.writeFile(path.join(dir,'tool-env.json'),'{broken');
+    await assert.rejects(manager.environment(),/环境|environment/);
+  } finally {await fs.rm(dir,{recursive:true,force:true});}
+});
+
+test('bounded subprocess cancellation kills owned children and suppresses private stderr', async () => {
+  assert.equal(typeof runtime.runBounded,'function');
+  const controller=new AbortController();
+  const running=runtime.runBounded(process.execPath,['-e','console.error("PRIVATE_FIXTURE"); setTimeout(()=>{}, 30000)'],{signal:controller.signal});
+  setTimeout(()=>controller.abort(),30);
+  await assert.rejects(running,error=>error.message==='安装已取消'&&!error.message.includes('PRIVATE_FIXTURE'));
+});
+
+test('install sanitizes file system errors before emitting progress', async () => {
+  const dir=await fs.mkdtemp(path.join(os.tmpdir(),'dswhale-error-'));
+  const events=[];
+  try {
+    const file=path.join(dir,'private-fixture');
+    await fs.writeFile(file,'not a directory');
+    const manager=new runtime.RuntimeManager({source:dir,runtime:file,onProgress:event=>events.push(event)});
+    await assert.rejects(manager.install(),error=>!error.message.includes('private-fixture')&&!error.message.includes(dir));
+    assert.ok(!JSON.stringify(events).includes(dir));
+  }finally {await fs.rm(dir,{recursive:true,force:true});}
+});
+
+test('same-manager install joins one operation and validates backend without launching services', {skip:process.platform==='win32'}, async () => {
+  const dir=await fs.mkdtemp(path.join(os.tmpdir(),'dswhale-install-'));
+  const source=path.join(dir,'installed-source'), data=path.join(dir,'runtime'), tools=path.join(dir,'fixture-tools');
+  const oldPath=process.env.PATH;
+  const events=[];
+  try {
+    await fs.mkdir(source);await fs.mkdir(tools);await fs.mkdir(data);
+    await fs.writeFile(path.join(source,'pyproject.toml'),'[project]\nversion = "0.3.0a1"\n');
+    const writeExecutable=async(name,text)=>{const file=path.join(tools,name);await fs.writeFile(file,`#!/bin/sh\n${text}\n`,{mode:0o755});return file;};
+    const python=await writeExecutable('python3.12','if [ "$1" = "--version" ]; then printf "Python 3.12.15\\n"; else printf \'{"dswhale":"0.3.0a1","astrbot":"4.29.3"}\\n\'; fi');
+    const node=await writeExecutable('node','printf "v22.23.4\\n"');
+    const ffmpeg=await writeExecutable('ffmpeg','printf "ffmpeg version 9.0.2 Copyright\\n"');
+    const ffprobe=await writeExecutable('ffprobe','printf "ffprobe version 9.0.2 Copyright\\n"');
+    const uv=await writeExecutable('uv',String.raw`
+[ "$1" = "run" ] || exit 1
+[ "$DSWHALE_DESKTOP" = "1" ] || exit 2
+case "$*" in *astrbot.cli*|*login*) exit 3 ;; esac
+printf 'called\n' >> "$DSWHALE_RUNTIME_DIR/calls"
+mkdir -p "$DSWHALE_RUNTIME_DIR/venv/bin" "$DSWHALE_RUNTIME_DIR/astrbot/data/plugins/astrbot_plugin_livingmemory" "$DSWHALE_RUNTIME_DIR/astrbot/data/plugins/astrbot_plugin_dswhale"
+cp "${python}" "$DSWHALE_RUNTIME_DIR/venv/bin/python"
+printf '{}' > "$DSWHALE_RUNTIME_DIR/astrbot/data/cmd_config.json"
+printf '' > "$DSWHALE_RUNTIME_DIR/astrbot/data/plugins/astrbot_plugin_livingmemory/requirements.txt"
+printf '' > "$DSWHALE_RUNTIME_DIR/astrbot/data/plugins/astrbot_plugin_livingmemory/main.py"
+printf '' > "$DSWHALE_RUNTIME_DIR/astrbot/data/plugins/astrbot_plugin_dswhale/main.py"
+printf '{"version":"0.3.0a1","format":1}' > "$DSWHALE_RUNTIME_DIR/desktop-install.json"
+printf 'DSWHALE_PROGRESS {"step":"dependencies","progress":0.28}\n'
+`);
+    await fs.writeFile(path.join(data,'tool-env.json'),JSON.stringify({node,ffmpeg,ffprobe}));
+    process.env.PATH=tools+path.delimiter+oldPath;
+    // Replace only external uv acquisition; the subprocess, environment, completion check and lock are real.
+    const manager=new runtime.RuntimeManager({source,runtime:data,onProgress:event=>events.push(event)});
+    manager._uv=async()=>uv;
+    manager._platform=async()=>({id:'fixture',label:'Fixture',supported:true,detail:''});
+    assert.equal((await manager.inspect()).installed,false);
+    const first=manager.install(), second=manager.install();
+    assert.equal(first,second);
+    assert.equal((await first).installed,true);
+    assert.equal((await fs.readFile(path.join(data,'calls'),'utf8')).trim(),'called');
+    assert.ok(events.some(event=>event.step==='安装应用依赖'&&event.progress===0.28));
+    assert.equal(events.at(-1).phase,'ready');
+    assert.equal((await manager.inspect()).installed,true);
+    const prepared=await manager.inspect();
+    assert.equal(prepared.needsPrepare,false);
+    assert.equal(prepared.versionMatrix.expected.dswhale,'0.3.0a1');
+    assert.equal(prepared.versionMatrix.actual.astrbot,'4.29.3');
+    assert.equal(prepared.versionMatrix.actual.python,'3.12.15');
+    assert.equal(prepared.versionMatrix.actual.node,'22.23.4');
+    assert.equal(prepared.versionMatrix.actual.channel,'alpha');
+    await fs.writeFile(path.join(source,'pyproject.toml'),'[project]\nversion = "0.3.0a3"\n');
+    const outdated=await manager.inspect();
+    assert.equal(outdated.installed,false);assert.equal(outdated.needsPrepare,true);
+    assert.equal(outdated.versionMatrix.expected.dswhale,'0.3.0a3');
+    await fs.writeFile(path.join(source,'pyproject.toml'),'[project]\nversion = "0.3.0a1"\n');
+    await fs.rm(path.join(data,'astrbot/data/plugins/astrbot_plugin_dswhale/main.py'));
+    assert.equal((await manager.inspect()).installed,false);
+  }finally {process.env.PATH=oldPath;await fs.rm(dir,{recursive:true,force:true});}
+});
+
+test('runtime follows the current system proxy without reading saved network settings',async()=>{
+  const dir=await fs.mkdtemp(path.join(os.tmpdir(),'dswhale-policy-'));
+  try{
+    await fs.writeFile(path.join(dir,'network.json'),JSON.stringify({mode:'custom',proxyUrl:'http://stale.test:9999'}));
+    let proxy='http://127.0.0.1:7890';
+    const manager=new runtime.RuntimeManager({source:dir,runtime:dir,proxyResolver:async()=>proxy});
+    assert.equal((await manager.environment()).NODE_USE_ENV_PROXY,'1');
+    const env=await manager.environment();
+    assert.equal(env.HTTPS_PROXY,'http://127.0.0.1:7890/');
+    assert.match(env.NO_PROXY,/127\.0\.0\.1/);
+    assert.equal(env.DSWHALE_AUTO_SYSTEM_NETWORK,'1');
+    assert.equal(env.DSWHALE_NETWORK_CONFIG,undefined);
+    proxy='';const direct=await manager.environment();
+    assert.equal(direct.HTTPS_PROXY,undefined);
+  }finally{await fs.rm(dir,{recursive:true,force:true});}
+});
+
+test('child Node fetch uses the resolved proxy while local connections bypass it',async()=>{
+  const http=require('node:http'),net=require('node:net');
+  const dir=await fs.mkdtemp(path.join(os.tmpdir(),'dswhale-child-proxy-'));
+  const sockets=new Set();let tunnels=0;
+  const origin=http.createServer((request,response)=>response.end(request.url));
+  const proxy=http.createServer((_request,response)=>response.end('unexpected plain proxy request'));
+  proxy.on('connect',(_request,client,head)=>{
+    tunnels++;const upstream=net.connect(origin.address().port,'127.0.0.1');sockets.add(client);sockets.add(upstream);
+    upstream.on('connect',()=>{client.write('HTTP/1.1 200 Connection Established\r\n\r\n');if(head.length)upstream.write(head);client.pipe(upstream);upstream.pipe(client);});
+    client.on('error',()=>upstream.destroy());upstream.on('error',()=>client.destroy());
+  });
+  try{
+    await new Promise(resolve=>origin.listen(0,'127.0.0.1',resolve));
+    await new Promise(resolve=>proxy.listen(0,'127.0.0.1',resolve));
+    const manager=new runtime.RuntimeManager({source:dir,runtime:dir,proxyResolver:async()=>`http://127.0.0.1:${proxy.address().port}`});
+    const script=`Promise.all(['http://dswhale-network.invalid/video','http://127.0.0.1:${origin.address().port}/local'].map(async url=>(await fetch(url,{signal:AbortSignal.timeout(5000)})).text())).then(value=>console.log(JSON.stringify(value))).catch(()=>process.exit(1))`;
+    const result=await runtime.runBounded(process.execPath,['-e',script],{env:await manager.environment(),timeout:10000,maxBytes:1024});
+    assert.deepEqual(JSON.parse(result.toString()),['/video','/local']);assert.equal(tunnels,1);
+  }finally{for(const socket of sockets)socket.destroy();await Promise.all([new Promise(resolve=>proxy.close(resolve)),new Promise(resolve=>origin.close(resolve))]);await fs.rm(dir,{recursive:true,force:true});}
+});
+
+test('bootstrap network failures reach progress as safe source codes', {skip:process.platform==='win32'},async()=>{
+  const dir=await fs.mkdtemp(path.join(os.tmpdir(),'dswhale-bootstrap-net-')),events=[];
+  try{
+    const uv=path.join(dir,'uv');
+    await fs.writeFile(uv,'#!/bin/sh\nprintf \'DSWHALE_NETWORK_ERROR {"code":"NET_PROXY","source":"nodejs"}\\n\'\nprintf \'PRIVATE /synthetic-home/private password\\n\' >&2\nexit 1\n',{mode:0o755});
+    const manager=new runtime.RuntimeManager({source:dir,runtime:path.join(dir,'runtime'),onProgress:event=>events.push(event)});
+    manager._uv=async()=>uv;manager._pythonChoice=async()=>null;
+    manager._platform=async()=>({supported:true});
+    await assert.rejects(manager.install(),error=>error.code==='NET_PROXY'&&error.source==='nodejs'&&!error.message.includes('PRIVATE'));
+    assert.equal(events.at(-1).code,'NET_PROXY');assert.ok(!JSON.stringify(events).includes('/synthetic-home/private'));
+  }finally{await fs.rm(dir,{recursive:true,force:true});}
+});
+
+test('media probe exposes only the clean version identifier', {skip:process.platform==='win32'}, async () => {
+  const dir=await fs.mkdtemp(path.join(os.tmpdir(),'dswhale-probe-'));
+  try {
+    const file=path.join(dir,'ffmpeg');
+    await fs.writeFile(file,'#!/bin/sh\nprintf "ffmpeg version 9.0.2-essentials_build Copyright (c) 2000-2026 developers\\nconfiguration: flags\\n"\n',{mode:0o755});
+    const manager=new runtime.RuntimeManager({source:dir,runtime:path.join(dir,'runtime')});
+    const result=await manager._version(file,'ffmpeg',process.env);
+    assert.equal(result.version,'9.0.2-essentials_build');
+    assert.equal(result.ok,true);
+    await fs.writeFile(file,'#!/bin/sh\nprintf "PRIVATE /synthetic-home/private proxy-password\\n"\n',{mode:0o755});
+    const unsafe=await manager._version(file,'python',process.env);
+    assert.equal(unsafe.version,'未知版本');
+    assert.equal(unsafe.ok,false);
+  }finally {await fs.rm(dir,{recursive:true,force:true});}
+});
+
+test('inspect preserves incompatible Python discovery while installer selects compatible only', async () => {
+  const dir=await fs.mkdtemp(path.join(os.tmpdir(),'dswhale-old-python-'));
+  try {
+    const manager=new runtime.RuntimeManager({source:dir,runtime:path.join(dir,'runtime')});
+    manager._platform=async()=>({id:'fixture',label:'Fixture',supported:true,detail:''});
+    manager._version=async(command,tool)=>{
+      if(tool==='python')return command==='python3'?{version:'Python 3.11.10',ok:false}:null;
+      if(tool==='node')return {version:'v24.0.0',ok:false};
+      return {version:'9.0.2',ok:true};
+    };
+    const result=await manager.inspect();
+    const python=result.components.find(item=>item.id==='python');
+    assert.equal(python.version,'Python 3.11.10');
+    assert.ok(['outdated','incompatible'].includes(python.status));
+    assert.match(python.detail,/专用 Python 3\.12/);
+    assert.equal(result.components.find(item=>item.id==='node').status,'incompatible');
+    assert.equal(await manager._pythonChoice({}),null);
+  }finally {await fs.rm(dir,{recursive:true,force:true});}
+});
+
+
+test('GUI environment detects trusted platform tool directories with an empty PATH', {skip:!['darwin','win32'].includes(process.platform)}, async()=>{
+  const dir=await fs.mkdtemp(path.join(os.tmpdir(),'dswhale-gui-path-'));
+  const previous=process.env.PATH;
+  try {
+    process.env.PATH='';
+    const managed=path.join(dir,'managed-tools');
+    await fs.writeFile(path.join(dir,'tool-env.json'),JSON.stringify({node:path.join(managed,'node')}));
+    const manager=new runtime.RuntimeManager({source:dir,runtime:dir});
+    const directories=(await manager.environment()).PATH.split(path.delimiter);
+    assert.equal(directories[0],managed);
+    if(process.platform==='darwin') {
+      assert.ok(directories.includes('/opt/homebrew/bin'));
+      assert.ok(directories.includes('/usr/local/bin'));
+    }else if(process.env.LOCALAPPDATA)assert.ok(directories.includes(path.join(process.env.LOCALAPPDATA,'Microsoft','WinGet','Links')));
+    assert.ok(!directories.includes(''));
+    process.env.PATH=directories.join(path.delimiter);
+    const repeated=(await manager.environment()).PATH.split(path.delimiter);
+    assert.equal(repeated.length,new Set(repeated).size);
+  }finally {if(previous===undefined)delete process.env.PATH;else process.env.PATH=previous;await fs.rm(dir,{recursive:true,force:true});}
+});
+
+test('duplicate version probes for one tool are coalesced inside an inspect pass', async () => {
+  const fsSync = require('node:fs');
+  const vm = require('node:vm');
+  const { EventEmitter } = require('node:events');
+  const file = path.resolve(__dirname, '../lib/runtime.cjs');
+  const nativeRequire = require('node:module').createRequire(file);
+  const loaded = { exports: {} };
+  let calls = 0;
+  // Only process creation is replaced. Run the actual version parser, bounded
+  // stdout reader and memoization on every OS, without a POSIX shell fixture.
+  const spawn = (command, args) => {
+    assert.equal(command, 'synthetic-python');
+    assert.deepEqual(Array.from(args), ['--version']);
+    calls++;
+    const child = new EventEmitter();
+    child.stdout = new EventEmitter();
+    child.stderr = new EventEmitter();
+    queueMicrotask(() => {
+      child.stdout.emit('data', Buffer.from('Python 3.12.15\n'));
+      child.emit('close', 0);
+    });
+    return child;
+  };
+  vm.runInNewContext(fsSync.readFileSync(file, 'utf8'), {
+    module: loaded, require: name => name === 'node:child_process' ? { spawn } : nativeRequire(name),
+    process, Buffer, setTimeout, clearTimeout,
+  });
+  const manager = Object.create(loaded.exports.RuntimeManager.prototype);
+  manager._versionMemo = new Map();
+  const [first, second] = await Promise.all([
+    manager._version('synthetic-python', 'python', {}),
+    manager._version('synthetic-python', 'python', {}),
+  ]);
+  assert.equal(first.version, 'Python 3.12.15');
+  assert.equal(first.ok, true);
+  assert.deepEqual(first, second);
+  assert.deepEqual(await manager._version('synthetic-python', 'python', {}), first);
+  assert.equal(calls, 1);
+});
+
+test('activation maintenance finalizes or rolls back through the managed runtime', async () => {
+  const dir=await fs.mkdtemp(path.join(os.tmpdir(),'dswhale-activate-'));
+  try {
+    const bin=path.join(dir,'venv',process.platform==='win32'?'Scripts':'bin');
+    await fs.mkdir(bin,{recursive:true});
+    const script=path.join(bin,process.platform==='win32'?'python.exe':'python');
+    await fs.writeFile(script,`#!/bin/sh\n[ "$DSWHALE_RUNTIME_DIR" = ${JSON.stringify(dir)} ] || exit 9\nif [ "$2" = finalize ]; then printf 'DSWHALE_ACTIVATION finalized\\n'; else printf 'DSWHALE_ACTIVATION rolled-back\\n'; fi\n`);
+    await fs.chmod(script,0o755);
+    const manager=new runtime.RuntimeManager({source:dir,runtime:dir});
+    assert.equal(await manager.finalizeActivation(),true);
+    assert.equal(await manager.rollbackActivation(),true);
+    await assert.rejects(manager.maintainActivation('unknown'),/未知|maintenance/);
+    await fs.rm(script,{force:true});
+    assert.equal(await manager.finalizeActivation(),false);
+  } finally {await fs.rm(dir,{recursive:true,force:true});}
+});

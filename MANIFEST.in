@@ -1,0 +1,30 @@
+include main.py metadata.yaml _conf_schema.json requirements.txt LICENSE THIRD_PARTY_NOTICES.md SECURITY.md
+include runtime-lock.json
+include README.md CONTRIBUTING.md .gitignore .gitattributes
+include docs/setup.md docs/operations.md
+recursive-include scripts *.py *.ps1 *.command
+include Install.command Install.cmd Start.command Start.cmd Bili-Settings.command Bili-Settings.cmd
+recursive-include dswhale/bili_bridge *.js *.mjs *.json *.html *.md LICENSE
+prune dswhale/bili_bridge/node_modules
+include docs/bilibili.md docs/upgrading.md docs/qq-dual-login.md
+recursive-include tests *.mjs
+recursive-include tests *.py
+recursive-include .github *.yml
+prune .private
+prune .runtime
+prune .superpowers
+exclude docs/local-run*.md
+
+include docs/windows.md docs/macos.md
+include docs/design.md
+
+include package.json package-lock.json electron-builder.cjs
+recursive-include desktop *.cjs *.json *.html *.css *.js *.svg *.png *.icns *.ico *.plist *.sh
+recursive-include scripts *.cjs
+include dswhale/media_assets.json
+include docs/desktop.md docs/linux.md
+prune desktop-dist
+prune desktop-resources
+prune node_modules
+
+include docs/extensions.md docs/qq-social.md docs/qq-isolation.md docs/updates.md docs/troubleshooting.md

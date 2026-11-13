@@ -1,0 +1,787 @@
+"""Small, offline connection settings interface for the desktop application."""
+
+import argparse
+import hashlib
+import hmac
+import json
+import os
+import re
+import shutil
+import sys
+import time
+import uuid
+from pathlib import Path
+
+from filelock import Timeout
+
+from . import config_migrations
+from .install import InstallError, offline_host
+from .private_files import (
+    ensure_private_directory,
+    protect_windows_private,
+)
+from .private_files import (
+    write_private_json as _shared_private_json,
+)
+
+FIELDS = {
+    "qqConnectionMode",
+    "officialOwnerUMO",
+    "dashboardPort",
+    "biliEnabled",
+    "proactiveEnabled",
+    "defaultDelivery",
+    "replyStyleMode",
+    "replyStyleMaxBubbles",
+    "replyStyleInterval",
+    "replyStylePunctuation",
+    "replyStylePrompt",
+    "replyStyleCustomRegex",
+    "replyStyleCustomCleanup",
+}
+
+
+def _load(path, default):
+    return json.loads(path.read_text(encoding="utf-8-sig")) if path.exists() else default
+
+
+def _files(host):
+    data = Path(host) / "data"
+    return data / "cmd_config.json", data / "config/astrbot_plugin_dswhale_config.json"
+
+
+def config_revision(host):
+    """Stable digest of both settings documents for optimistic concurrency."""
+    config_file, fish_file = _files(host)
+    digest = hashlib.sha256()
+    for path in (config_file, fish_file):
+        try:
+            payload = path.read_bytes()
+        except FileNotFoundError:
+            payload = b""
+        digest.update(path.name.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(len(payload).to_bytes(8, "big"))
+        digest.update(payload)
+    return digest.hexdigest()[:32]
+
+
+def read_settings(host):
+    config_file, fish_file = _files(host)
+    config, fish = _load(config_file, {}), _load(fish_file, {})
+    return {
+        "dashboardPort": config.get("dashboard", {}).get("port", 6185),
+        "ownerQQ": "",
+        "qqConnectionMode": "official",
+        "officialOwnerUMO": fish.get("official_owner_umo", ""),
+        "officialConfigured": any(
+            p.get("type") == "qq_official"
+            and p.get("enable")
+            and p.get("appid")
+            and p.get("secret")
+            for p in config.get("platform", [])
+            if isinstance(p, dict)
+        ),
+        "platformId": "",
+        "onebotPort": 6199,
+        "onebotToken": "",
+        "biliEnabled": bool(fish.get("bili_enabled", False)),
+        "proactiveEnabled": bool(fish.get("proactive_enabled", False)),
+        "signatureEnabled": False,
+        "qzoneEnabled": False,
+        "defaultDelivery": "official",
+        "replyStyleMode": fish.get("reply_style_mode", "natural"),
+        "replyStyleMaxBubbles": fish.get("reply_style_max_bubbles", 3),
+        "replyStyleInterval": fish.get("reply_style_interval", "0.8,1.5"),
+        "replyStylePunctuation": fish.get("reply_style_punctuation", "keep"),
+        "replyStylePrompt": bool(fish.get("reply_style_prompt", True)),
+        "replyStyleCustomRegex": fish.get("reply_style_custom_regex", ""),
+        "replyStyleCustomCleanup": fish.get("reply_style_custom_cleanup", ""),
+        "persona": fish.get("persona", ""),
+        "hostReplyPrefix": bool((config.get("platform_settings") or {}).get("reply_prefix")),
+        "hostTtsEnabled": bool((config.get("provider_tts_settings") or {}).get("enable")),
+        "napcatBound": False,
+        "officialBound": bool(fish.get("official_owner_umo")),
+        "napcatBoundPlatformId": "",
+        "officialBoundPlatformId": (
+            str(fish.get("official_owner_umo", "")).split(":", 1)[0]
+            if fish.get("official_owner_umo")
+            else ""
+        ),
+        "napcatConfigured": False,
+        "hasModels": any(
+            p.get("enable", True) and p.get("model") for p in config.get("provider", [])
+        ),
+        "configRevision": config_revision(host),
+    }
+
+
+def read_host_reply_context(host, platform=""):
+    """Resolve the one host profile that decorates replies, safely.
+
+    The desktop preview only needs public decoration flags. Credentials and
+    model settings are dropped before anything crosses the CLI boundary.
+    """
+    config_file, fish_file = _files(host)
+    if not config_file.is_file():
+        return {"computed": False, "reason": "config_missing"}
+    try:
+        config = _load(config_file, {})
+        fish = _load(fish_file, {})
+    except (OSError, ValueError):
+        return {"computed": False, "reason": "config_missing"}
+    if not isinstance(config, dict):
+        return {"computed": False, "reason": "config_missing"}
+    requested = str(platform or "").lower()
+    if requested == "qq_official":
+        # The UI calls the whole official family qq_official. The host may use
+        # either the WebSocket or webhook platform type; the bound profile id
+        # in official_owner_umo decides which one is actually in use.
+        wanted = {"qq_official", "qq_official_webhook"}
+    elif requested == "qq_official_webhook":
+        wanted = {"qq_official_webhook"}
+    else:
+        if requested:
+            return {"computed": False, "reason": "profile_unknown"}
+        wanted = {"qq_official", "qq_official_webhook"}
+    ident = str(fish.get("official_owner_umo", "") or "").split(":", 1)[0]
+    candidates = [
+        item
+        for item in config.get("platform", [])
+        if isinstance(item, dict) and item.get("type") in wanted
+    ]
+    if ident:
+        candidates = [item for item in candidates if item.get("id") == ident]
+    if len(candidates) != 1:
+        family = {"qq_official", "qq_official_webhook"}
+        family_profiles = [
+            item
+            for item in config.get("platform", [])
+            if isinstance(item, dict) and item.get("type") in family
+        ]
+        # A profile from the same family but a different concrete type means the
+        # requested type is not the bound one; that is an unknown profile, not a
+        # missing configuration.
+        return {
+            "computed": False,
+            "reason": "profile_unknown" if family_profiles else "config_missing",
+        }
+    profile = candidates[0]
+    if not profile.get("enable"):
+        return {"computed": False, "reason": "profile_unknown"}
+    actual_platform = str(profile.get("type") or "")
+    safe_config = {
+        "platform_settings": config.get("platform_settings") or {},
+        "provider_settings": config.get("provider_settings") or {},
+        "provider_tts_settings": {
+            key: (config.get("provider_tts_settings") or {}).get(key)
+            for key in ("enable", "trigger_probability")
+        },
+        "t2i": config.get("t2i"),
+        "t2i_word_threshold": config.get("t2i_word_threshold"),
+        "t2i_strategy": config.get("t2i_strategy"),
+    }
+    from .host_config import HostReplyConfig
+
+    cfg = HostReplyConfig.from_mapping(
+        safe_config, platform=actual_platform, profile_id=str(profile.get("id") or "")
+    )
+    return {
+        "computed": True,
+        "reason": "",
+        "host": {
+            "id": cfg.profile_id,
+            "platform": actual_platform,
+            "strategy": cfg.strategy,
+            "segmented": cfg.segmented,
+            "config": safe_config,
+        },
+        "hostSource": cfg.host_source(platform=actual_platform),
+    }
+
+
+def setup_status(host):
+    value = read_settings(host)
+    memory = _load(Path(host) / "data/config/astrbot_plugin_livingmemory_config.json", {})
+    providers = memory.get("provider_settings", {})
+    # LivingMemory keeps provider selection inside basic settings in some releases.
+    providers = memory.get("basic_settings", providers)
+    return {
+        "qqConnectionMode": value["qqConnectionMode"],
+        "ownerConfigured": bool(value["officialOwnerUMO"]),
+        "qqConfigured": value["officialConfigured"],
+        "modelConfigured": value["hasModels"],
+        "memoryConfigured": bool(
+            providers.get("embedding_provider_id") or memory.get("embedding_provider_id")
+        ),
+        "biliEnabled": value["biliEnabled"],
+    }
+
+
+def _safe_file(path, host):
+    for candidate in [path, *path.parents]:
+        if candidate == Path(host).parent:
+            break
+        if candidate.is_symlink():
+            raise ValueError("配置目录包含符号链接，请先检查数据目录")
+
+
+def _valid_initial_login(config, credential):
+    dashboard = config.get("dashboard", {})
+    try:
+        if not dashboard.get("password_change_required") or credential.get(
+            "username"
+        ) != dashboard.get("username", "astrbot"):
+            return False
+        password = credential["password"]
+        if not isinstance(password, str) or not 1 <= len(password) <= 256:
+            return False
+        algorithm, iterations, salt, expected = dashboard["pbkdf2_password"].split("$")
+        iterations = int(iterations)
+        if algorithm != "pbkdf2_sha256" or not 100_000 <= iterations <= 5_000_000:
+            return False
+        return hmac.compare_digest(
+            hashlib.pbkdf2_hmac("sha256", password.encode(), bytes.fromhex(salt), iterations),
+            bytes.fromhex(expected),
+        )
+    except (KeyError, ValueError, TypeError, AttributeError):
+        return False
+
+
+def _write_private_json(path, value):
+    return _shared_private_json(path, value)
+
+
+def prepare_backup(host):
+    """Include a still-valid initial credential in a private desktop export."""
+    host = Path(host)
+    with offline_host(host):
+        config_file, _ = _files(host)
+        auth = host.parent / "desktop-auth.json"
+        attachment = host / "data/.dswhale-desktop-login.json"
+        for path in (config_file, auth, attachment):
+            _safe_file(path, host)
+        config, credential = _load(config_file, {}), _load(auth, {})
+        if _valid_initial_login(config, credential):
+            _write_private_json(
+                attachment, {key: credential[key] for key in ("username", "password")}
+            )
+        else:
+            attachment.unlink(missing_ok=True)
+    return {"prepared": True}
+
+
+def finish_backup(host):
+    host = Path(host)
+    with offline_host(host):
+        attachment = host / "data/.dswhale-desktop-login.json"
+        _safe_file(attachment, host)
+        attachment.unlink(missing_ok=True)
+    return {"finished": True}
+
+
+def prepare_import(host):
+    """Adapt imported local settings without changing identity, models or memory."""
+    host = Path(host)
+    with offline_host(host):
+        config_file, fish_file = _files(host)
+        auth = host.parent / "desktop-auth.json"
+        attachment = host / "data/.dswhale-desktop-login.json"
+        for path in (config_file, fish_file, auth, attachment):
+            _safe_file(path, host)
+        config, fish = _load(config_file, {}), _load(fish_file, {})
+        dashboard = config.setdefault("dashboard", {})
+        dashboard.update(enable=True, host="127.0.0.1")
+        dashboard.setdefault("port", 6185)
+        dashboard.setdefault("ssl", {})["enable"] = False
+        for key in ("bili_node_path", "cookies_path"):
+            if fish.get(key) and not Path(fish[key]).expanduser().is_file():
+                fish[key] = ""
+        candidate, _ = config_migrations.plan_migration({"config": config, "fish": fish})
+        config, fish = candidate["config"], candidate["fish"]
+        _replace_documents(host, [(config_file, config), (fish_file, fish)])
+        imported_login = _load(attachment, {})
+        if _valid_initial_login(config, imported_login):
+            _write_private_json(
+                auth, {key: imported_login[key] for key in ("username", "password")}
+            )
+        elif not _valid_initial_login(config, _load(auth, {})):
+            auth.unlink(missing_ok=True)
+        attachment.unlink(missing_ok=True)
+    return {"prepared": True}
+
+
+def _validated_patch(patch):
+    """Validate only the fields the caller actually supplied.
+
+    Missing fields are never synthesized here: a settings save carries user
+    intent for the edited fields only, not defaults for everything else.
+    """
+    if not isinstance(patch, dict) or set(patch) - FIELDS:
+        raise ValueError("包含不支持的配置项")
+    for key, value in patch.items():
+        if key == "dashboardPort":
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise ValueError("端口需要为 1024–65535 的整数")
+        elif key in {
+            "biliEnabled",
+            "proactiveEnabled",
+            "replyStylePrompt",
+        }:
+            if not isinstance(value, bool):
+                raise ValueError("开关值无效")
+        elif key == "replyStyleMaxBubbles":
+            if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 3:
+                raise ValueError("目标条数应为 1–3 的整数")
+        elif not isinstance(value, str):
+            raise ValueError("配置项类型无效")
+    return dict(patch)
+
+
+OFFICIAL_FIELDS = {"officialOwnerUMO"}
+SWITCH_FIELDS = {"biliEnabled", "proactiveEnabled"}
+
+
+def _validated_official_binding(host, config, fish, official):
+    """Validate an official binding independently of the legacy connection mode."""
+    from .config import Settings
+
+    official = str(official).strip()
+    Settings.from_mapping({"qq_connection_mode": "official", "official_owner_umo": official})
+    if not official:
+        return ""
+    ident = official.split(":", 1)[0]
+    platform = next(
+        (
+            item
+            for item in config.get("platform", [])
+            if isinstance(item, dict)
+            and item.get("id") == ident
+            and item.get("type") == "qq_official"
+        ),
+        None,
+    )
+    if not platform or not (
+        platform.get("enable") and platform.get("appid") and platform.get("secret")
+    ):
+        raise ValueError("请先创建并启用对应的 QQ 官方机器人，再复制其私聊会话 ID")
+    if official != str(fish.get("official_owner_umo", "")):
+        from .qq_identity import confirmed_c2c_scope
+
+        if not confirmed_c2c_scope(host / "data/plugin_data/astrbot_plugin_dswhale", official):
+            raise ValueError(
+                "请先在 QQ 消息列表私聊发送 /fish whoami，再复制本会话；不接受频道私信"
+            )
+    return official
+
+
+def _validate_delivery_target(config, probe, target):
+    binding = next((binding for binding in probe.owner_bindings if binding.channel == target), None)
+    if binding is None:
+        raise ValueError("请先完成该渠道的主人绑定，再选择主动消息渠道")
+    adapter = "qq_official"
+    platform = next(
+        (
+            item
+            for item in config.get("platform", [])
+            if isinstance(item, dict)
+            and item.get("id") == binding.platform_id
+            and item.get("type") == adapter
+        ),
+        None,
+    )
+    ready = bool(platform and platform.get("enable"))
+    if ready and target == "official":
+        ready = bool(platform.get("appid") and platform.get("secret"))
+    if not ready:
+        raise ValueError("该渠道的 QQ 连接尚未启用或配置不完整，请先在连接管理中检查")
+
+
+def _validate_active_switches(fish, value):
+    """Validate enabled features against the bindings present after the patch."""
+    from .config import Settings
+
+    probe = Settings.from_mapping(
+        {
+            "official_owner_umo": str(fish.get("official_owner_umo", "")),
+            "qq_connection_mode": str(fish.get("qq_connection_mode", "official")),
+            "qq_default_delivery": str(fish.get("qq_default_delivery", "")),
+        }
+    )
+    if (value["proactiveEnabled"] or value["biliEnabled"]) and not probe.owner_scope:
+        raise ValueError("请先绑定 QQ 用户，再启用主动功能")
+
+
+HISTORY_RELATIVE = Path("data/config/.dswhale-settings-history")
+HISTORY_LIMIT = 20
+HISTORY_FIELDS = tuple(sorted(FIELDS))
+RECEIPT_RELATIVE = Path("data/plugin_data/astrbot_plugin_dswhale/config-migration-receipt.json")
+
+
+def _record_settings_change(host, before, after):
+    """Record a bounded, secret-free local change history for field restore."""
+    changes = []
+    for field in HISTORY_FIELDS:
+        old, new = before.get(field), after.get(field)
+        if old != new or type(old) is not type(new):
+            changes.append({"field": field, "before": old, "after": new})
+    if not changes:
+        return None
+    history = Path(host) / HISTORY_RELATIVE
+    ensure_private_directory(history)
+    identifier = f"{time.time_ns()}-{uuid.uuid4().hex[:8]}"
+    record = {
+        "format": 1,
+        "changedAt": time.time(),
+        "revisionBefore": before.get("configRevision", ""),
+        "revisionAfter": after.get("configRevision", ""),
+        "changes": changes,
+    }
+    _write_private_json(history / f"{identifier}.json", record)
+    for stale in sorted(history.glob("*.json"))[:-HISTORY_LIMIT]:
+        stale.unlink(missing_ok=True)
+    return identifier
+
+
+def list_settings_history(host):
+    host = Path(host)
+    history = host / HISTORY_RELATIVE
+    records = []
+    if history.is_dir():
+        for file in sorted(history.glob("*.json"), reverse=True)[:HISTORY_LIMIT]:
+            try:
+                value = json.loads(file.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if (
+                not isinstance(value, dict)
+                or value.get("format") != 1
+                or not isinstance(value.get("changes"), list)
+            ):
+                continue
+            records.append(
+                {
+                    "id": file.stem,
+                    "changedAt": value.get("changedAt", 0),
+                    "changes": [
+                        {
+                            "field": change.get("field", ""),
+                            "before": change.get("before"),
+                            "after": change.get("after"),
+                        }
+                        for change in value["changes"]
+                        if isinstance(change, dict) and change.get("field") in HISTORY_FIELDS
+                    ],
+                }
+            )
+    receipt = None
+    receipt_file = host / RECEIPT_RELATIVE
+    if receipt_file.is_file():
+        try:
+            value = json.loads(receipt_file.read_text(encoding="utf-8"))
+            if isinstance(value, dict) and value.get("format") == 1:
+                receipt = {
+                    key: value.get(key)
+                    for key in (
+                        "migrationVersion",
+                        "archivedFields",
+                        "archiveFile",
+                        "verifiedAt",
+                        "normalizedConfig",
+                    )
+                }
+        except (OSError, ValueError):
+            receipt = None
+    return {"format": 1, "records": records, "migrationReceipt": receipt}
+
+
+def restore_setting(host, record_id, field, expected_revision=None):
+    """Restore one recorded field value with optimistic revision protection."""
+    host = Path(host)
+    if not isinstance(record_id, str) or not re.fullmatch(r"[0-9]{10,20}-[a-f0-9]{8}", record_id):
+        raise ValueError("设置修改记录无效")
+    if field not in HISTORY_FIELDS:
+        raise ValueError("该设置项不支持恢复")
+    record_file = host / HISTORY_RELATIVE / f"{record_id}.json"
+    if not record_file.is_file():
+        raise ValueError("找不到该设置修改记录")
+    record = json.loads(record_file.read_text(encoding="utf-8"))
+    changes = record.get("changes", []) if isinstance(record, dict) else []
+    change = next(
+        (item for item in changes if isinstance(item, dict) and item.get("field") == field),
+        None,
+    )
+    if change is None or "before" not in change:
+        raise ValueError("该设置修改记录不包含此项")
+    current = read_settings(host)
+    if expected_revision is not None and expected_revision != current["configRevision"]:
+        raise ValueError("设置已在另一处更新，请刷新并核对本次修改后重试")
+    restored = save_settings(host, {field: change["before"]}, current["configRevision"])
+    return {**restored, "restoredField": field, "restoredFrom": record_id}
+
+
+def _replace_documents(host, entries):
+    """Atomically replace the listed documents with one recoverable backup."""
+    backup = Path(host) / ".desktop-settings-backups" / uuid.uuid4().hex
+    ensure_private_directory(backup)
+    replaced = []
+    try:
+        for index, (path, document) in enumerate(entries):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if path.exists():
+                shutil.copyfile(path, backup / str(index))
+            temporary = path.with_name(path.name + "." + uuid.uuid4().hex + ".tmp")
+            try:
+                if os.name == "nt":
+                    temporary.touch()
+                    protect_windows_private(temporary)
+                temporary.write_text(
+                    json.dumps(document, ensure_ascii=False, indent=2), encoding="utf-8"
+                )
+                if os.name != "nt":
+                    os.chmod(temporary, 0o600)
+                temporary.replace(path)
+                replaced.append((path, backup / str(index)))
+            finally:
+                temporary.unlink(missing_ok=True)
+    except BaseException:
+        for path, original in reversed(replaced):
+            if original.exists():
+                original.replace(path)
+            else:
+                path.unlink(missing_ok=True)
+        raise
+
+
+def save_settings(host, patch, expected_revision=None):
+    host = Path(host)
+    patch = _validated_patch(patch)
+    if expected_revision is not None and (
+        not isinstance(expected_revision, str)
+        or not re.fullmatch(r"[a-f0-9]{8,64}", expected_revision)
+    ):
+        raise ValueError("设置修订标识无效")
+    if not patch:
+        return read_settings(host)
+    try:
+        with offline_host(host):
+            config_file, fish_file = _files(host)
+            if not config_file.is_file():
+                raise ValueError("请先完成环境安装")
+            for path in (config_file, fish_file, host / ".desktop-settings-backups"):
+                _safe_file(path, host)
+            if expected_revision is not None and expected_revision != config_revision(host):
+                raise ValueError("设置已在另一处更新，请刷新并核对本次修改后重试")
+            original_config, original_fish = _load(config_file, {}), _load(fish_file, {})
+            if not isinstance(original_config, dict) or not isinstance(original_fish, dict):
+                raise ValueError("配置文件格式不正确，请先检查数据目录")
+            candidate, _ = config_migrations.plan_migration(
+                {"config": original_config, "fish": original_fish}
+            )
+            config, fish = candidate["config"], candidate["fish"]
+            before_settings = read_settings(host)
+            value = {**before_settings, **patch}
+            switches = ("biliEnabled", "proactiveEnabled")
+            for key in switches:
+                if key in patch and not isinstance(patch[key], bool):
+                    raise ValueError("开关值无效")
+            dashboard_port = value["dashboardPort"]
+            if "dashboardPort" in patch and (
+                isinstance(dashboard_port, bool)
+                or not isinstance(dashboard_port, int)
+                or not 1024 <= dashboard_port <= 65535
+            ):
+                raise ValueError("控制台端口需要为 1024–65535 的整数")
+            if "defaultDelivery" in patch and value["defaultDelivery"] != "official":
+                raise ValueError("主动消息默认渠道无效")
+            mode = value["qqConnectionMode"]
+            if "qqConnectionMode" in patch and (not isinstance(mode, str) or mode != "official"):
+                raise ValueError("QQ 接入方式无效")
+            if "dashboardPort" in patch:
+                config.setdefault("dashboard", {}).update(port=dashboard_port)
+            if "officialOwnerUMO" in patch:
+                fish["official_owner_umo"] = _validated_official_binding(
+                    host, config, fish, value["officialOwnerUMO"]
+                )
+            if "qqConnectionMode" in patch:
+                fish["qq_connection_mode"] = mode
+            switches_touched = bool(
+                (OFFICIAL_FIELDS | {"qqConnectionMode"} | SWITCH_FIELDS) & set(patch)
+            )
+            for key, fish_key in (
+                ("biliEnabled", "bili_enabled"),
+                ("proactiveEnabled", "proactive_enabled"),
+            ):
+                if key in patch:
+                    fish[fish_key] = value[key]
+            if "replyStyleMode" in patch and value["replyStyleMode"] not in {
+                "inherit",
+                "natural",
+                "single",
+                "custom",
+            }:
+                raise ValueError("回复方式无效")
+            if "replyStylePunctuation" in patch and value["replyStylePunctuation"] not in {
+                "keep",
+                "sentence_end",
+            }:
+                raise ValueError("标点处理方式无效")
+            if "replyStyleInterval" in patch:
+                from .reply_style import parse_interval
+
+                parse_interval(value["replyStyleInterval"])
+            if "replyStyleCustomRegex" in patch or "replyStyleCustomCleanup" in patch:
+                from .reply_style import validate_custom
+                from .reply_style_isolate import validate_sync
+
+                regex = validate_custom(value["replyStyleCustomRegex"], "自定义拆分规则") or ""
+                cleanup = validate_custom(value["replyStyleCustomCleanup"], "自定义清理规则") or ""
+                if regex or cleanup:
+                    validate_sync(regex, cleanup)
+            for key, fish_key in (
+                ("replyStyleMode", "reply_style_mode"),
+                ("replyStyleMaxBubbles", "reply_style_max_bubbles"),
+                ("replyStyleInterval", "reply_style_interval"),
+                ("replyStylePunctuation", "reply_style_punctuation"),
+                ("replyStylePrompt", "reply_style_prompt"),
+                ("replyStyleCustomRegex", "reply_style_custom_regex"),
+                ("replyStyleCustomCleanup", "reply_style_custom_cleanup"),
+            ):
+                if key in patch:
+                    fish[fish_key] = value[key]
+            if "defaultDelivery" in patch:
+                target = value["defaultDelivery"]
+                if not target and (value["proactiveEnabled"] or value["biliEnabled"]):
+                    raise ValueError("开启主动功能时请选择一个有效的主动消息渠道")
+                if target:
+                    from .config import Settings as _Settings
+
+                    probe = _Settings.from_mapping(
+                        {
+                            "official_owner_umo": str(fish.get("official_owner_umo", "")),
+                            "qq_default_delivery": target,
+                            "proactive_enabled": False,
+                        }
+                    )
+                    _validate_delivery_target(config, probe, target)
+                fish["qq_default_delivery"] = target
+            if switches_touched and any(value[key] for key in SWITCH_FIELDS):
+                _validate_active_switches(fish, value)
+            writes = []
+            for index, (path, document, original) in enumerate(
+                (
+                    (config_file, config, original_config),
+                    (fish_file, fish, original_fish),
+                )
+            ):
+                if document != original:
+                    writes.append((index, path, document))
+            if not writes:
+                return read_settings(host)
+            _replace_documents(host, [(path, document) for _, path, document in writes])
+            after = read_settings(host)
+            try:
+                _record_settings_change(host, before_settings, after)
+            except OSError:
+                # The settings write is authoritative; a full disk must not turn
+                # a successful save into an apparent failure.
+                pass
+            return after
+    except (Timeout, InstallError):
+        raise ValueError("请先停止机器人，再保存连接设置") from None
+
+
+def migrate_settings(host):
+    """Apply additive config migrations inside the existing offline lock.
+
+    Missing files are a no-op (a fresh install lets the plugin create defaults);
+    corrupt files are rejected and left untouched.
+    """
+    host = Path(host)
+    try:
+        with offline_host(host):
+            config_file, fish_file = _files(host)
+            for path in (config_file, fish_file, host / ".desktop-settings-backups"):
+                _safe_file(path, host)
+            config, fish = _load(config_file, {}), _load(fish_file, {})
+            if not isinstance(config, dict) or not isinstance(fish, dict):
+                raise ValueError("配置文件格式不正确，请先检查数据目录")
+            candidate, changes = config_migrations.plan_migration({"config": config, "fish": fish})
+            version = fish.get(config_migrations.VERSION_KEY, 0)
+            if not changes:
+                return {"changed": False, "migrationVersion": version, "changes": []}
+            entries = [(fish_file, candidate["fish"])]
+            if candidate["config"] != config:
+                entries.insert(0, (config_file, candidate["config"]))
+            _replace_documents(host, entries)
+            return {
+                "changed": True,
+                "migrationVersion": candidate["fish"][config_migrations.VERSION_KEY],
+                "changes": changes,
+            }
+    except (Timeout, InstallError):
+        raise ValueError("请先停止机器人，再迁移设置") from None
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "action",
+        choices=(
+            "read",
+            "save",
+            "status",
+            "migrate",
+            "prepare-import",
+            "prepare-backup",
+            "finish-backup",
+            "history",
+            "restore-field",
+        ),
+    )
+    parser.add_argument("--host", type=Path, required=True)
+    args = parser.parse_args()
+    try:
+        if args.action == "save":
+            request = json.loads(sys.stdin.read(16_384))
+            if isinstance(request, dict) and set(request) == {"patch", "expectedRevision"}:
+                value = save_settings(args.host, request["patch"], request["expectedRevision"])
+            else:
+                # Legacy CLI callers may still send the bare settings object.
+                value = save_settings(args.host, request)
+        elif args.action == "history":
+            value = list_settings_history(args.host)
+        elif args.action == "restore-field":
+            request = json.loads(sys.stdin.read(16_384))
+            if not isinstance(request, dict):
+                raise ValueError("恢复请求无效")
+            value = restore_setting(
+                args.host,
+                request.get("recordId"),
+                request.get("field"),
+                request.get("expectedRevision"),
+            )
+        elif args.action == "migrate":
+            value = migrate_settings(args.host)
+        elif args.action == "prepare-import":
+            value = prepare_import(args.host)
+        elif args.action == "prepare-backup":
+            value = prepare_backup(args.host)
+        elif args.action == "finish-backup":
+            value = finish_backup(args.host)
+        else:
+            value = (read_settings if args.action == "read" else setup_status)(args.host)
+        print(json.dumps(value, ensure_ascii=False))
+        return 0
+    except (ValueError, OSError, TypeError, InstallError):
+        print(
+            json.dumps(
+                {"error": "配置未完成，请检查输入、文件权限，并停止机器人后重试"},
+                ensure_ascii=False,
+            )
+        )
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

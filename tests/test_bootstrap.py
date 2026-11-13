@@ -1,0 +1,1606 @@
+import importlib.util
+import json
+import zipfile
+from datetime import datetime
+from pathlib import Path
+
+import pytest
+
+
+def bootstrap():
+    spec = importlib.util.spec_from_file_location(
+        "dswhale_bootstrap", Path(__file__).parents[1] / "scripts/bootstrap.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _assert_private_files(*paths):
+    """Inspect the actual platform policy, including archives from prepare()."""
+    import os
+    import subprocess
+
+    if os.name != "nt":
+        for path in paths:
+            assert path.stat().st_mode & 0o777 == 0o600
+        return
+    script = (
+        '$ErrorActionPreference = "Stop"; '
+        "$current = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value; "
+        "foreach ($path in ($env:DSWHALE_TEST_PRIVATE_FILES | ConvertFrom-Json)) { "
+        "$acl = Get-Acl -LiteralPath $path; "
+        "if (-not $acl.AreAccessRulesProtected) { throw 'Unprotected DACL' }; "
+        "if ($acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value -ne $current) "
+        "{ throw 'Unexpected owner' }; "
+        "$rules = @($acl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier])); "
+        "if (@($rules | Where-Object { $_.IdentityReference.Value -ne $current }).Count -ne 0) "
+        "{ throw 'Unexpected access rule' } }"
+    )
+    subprocess.run(
+        [
+            str(
+                Path(os.environ.get("SystemRoot", r"C:\Windows"))
+                / "System32/WindowsPowerShell/v1.0/powershell.exe"
+            ),
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            script,
+        ],
+        env={
+            **{key: value for key, value in os.environ.items() if key.upper() != "PSMODULEPATH"},
+            "DSWHALE_TEST_PRIVATE_FILES": json.dumps([str(path) for path in paths]),
+        },
+        capture_output=True,
+        check=True,
+        timeout=30,
+    )
+
+
+def test_explicit_runtime_is_outside_source_and_legacy_default_stays_local(tmp_path, monkeypatch):
+    module = bootstrap()
+    assert hasattr(module, "runtime_directory")
+    monkeypatch.delenv("DSWHALE_RUNTIME_DIR", raising=False)
+    assert module.runtime_directory(tmp_path / "source") == tmp_path / "source/.runtime"
+    monkeypatch.setenv("DSWHALE_RUNTIME_DIR", str(tmp_path / "user data/runtime"))
+    assert module.runtime_directory(tmp_path / "source") == tmp_path / "user data/runtime"
+
+
+def test_new_desktop_dashboard_binds_loopback_and_preserves_existing_settings(tmp_path):
+    module = bootstrap()
+    assert hasattr(module, "configure_desktop_dashboard")
+    config = tmp_path / "data/cmd_config.json"
+    config.parent.mkdir()
+    config.write_text(
+        json.dumps(
+            {
+                "dashboard": {"host": "0.0.0.0", "port": 6185},
+                "provider": [{"api_key": "private-fixture"}],
+            }
+        )
+    )
+    module.configure_desktop_dashboard(tmp_path)
+    data = json.loads(config.read_text())
+    assert data["dashboard"]["host"] == "127.0.0.1"
+    assert data["dashboard"]["port"] == 6185
+    assert data["disable_metrics"] is True
+    assert data["provider"] == [{"api_key": "private-fixture"}]
+
+
+def test_preupgrade_snapshot_works_without_old_python_and_rejects_symlinks(tmp_path):
+    module = bootstrap()
+    assert hasattr(module, "snapshot_data")
+    host = tmp_path / "runtime/astrbot"
+    (host / "data").mkdir(parents=True)
+    (host / "data/memory.db").write_bytes(b"original data")
+    archive = module.snapshot_data(host, host.parent)
+    with zipfile.ZipFile(archive) as bundle:
+        assert bundle.read("data/memory.db") == b"original data"
+        assert json.loads(bundle.read("manifest.json"))["project"] == "DSWhale"
+    (host / "data/link").symlink_to(tmp_path)
+    with pytest.raises(ValueError, match="符号链接"):
+        module.snapshot_data(host, host.parent)
+
+
+@pytest.mark.parametrize("second_time", [datetime(2026, 11, 1), datetime(2026, 10, 31)])
+def test_preupgrade_snapshots_preserve_both_data_versions_when_clock_repeats_or_reverses(
+    tmp_path, monkeypatch, second_time
+):
+    import os
+    import stat
+
+    from dswhale.install import restore
+
+    module = bootstrap()
+    times = iter([datetime(2026, 11, 1), second_time])
+
+    class SnapshotClock:
+        @staticmethod
+        def now():
+            return next(times)
+
+    monkeypatch.setattr(module, "datetime", SnapshotClock)
+    host = tmp_path / "runtime/astrbot"
+    (host / "data").mkdir(parents=True)
+    memory = host / "data/memory.db"
+    memory.write_bytes(b"first data version")
+    first = module.snapshot_data(host, host.parent)
+    memory.write_bytes(b"second data version")
+    second = module.snapshot_data(host, host.parent)
+
+    assert first != second
+    assert set((host.parent / "backups").iterdir()) == {first, second}
+    for index, (archive, expected) in enumerate(
+        [(first, b"first data version"), (second, b"second data version")]
+    ):
+        assert archive.name.startswith("before-upgrade-") and archive.suffix == ".zip"
+        if os.name != "nt":
+            assert stat.S_IMODE(archive.stat().st_mode) == 0o600
+        with zipfile.ZipFile(archive) as bundle:
+            assert bundle.read("data/memory.db") == expected
+            assert json.loads(bundle.read("manifest.json")) == {"project": "DSWhale", "format": 1}
+        restored = tmp_path / f"restored-{index}"
+        restored.mkdir()
+        restore(restored, archive)
+        assert (restored / "data/memory.db").read_bytes() == expected
+
+
+@pytest.mark.parametrize("existing_symlink", [False, True])
+def test_preupgrade_snapshot_final_name_collision_preserves_existing_backup_and_cleans_stage(
+    tmp_path, monkeypatch, existing_symlink
+):
+    module = bootstrap()
+
+    class SnapshotClock:
+        @staticmethod
+        def now():
+            return datetime(2026, 11, 1)
+
+    monkeypatch.setattr(module, "datetime", SnapshotClock)
+    monkeypatch.setattr(module.secrets, "token_hex", lambda count: "a" * (count * 2))
+    host = tmp_path / "runtime/astrbot"
+    (host / "data").mkdir(parents=True)
+    memory = host / "data/memory.db"
+    memory.write_bytes(b"existing backup data")
+    archive = module.snapshot_data(host, host.parent)
+    original = archive.read_bytes()
+    if existing_symlink:
+        saved = tmp_path / "existing.zip"
+        archive.rename(saved)
+        archive.symlink_to(saved)
+    memory.write_bytes(b"new data must not replace backup")
+
+    with pytest.raises(FileExistsError):
+        module.snapshot_data(host, host.parent)
+
+    assert archive.read_bytes() == original
+    assert archive.is_symlink() == existing_symlink
+    assert list((host.parent / "backups").iterdir()) == [archive]
+    assert memory.read_bytes() == b"new data must not replace backup"
+
+
+def test_preupgrade_snapshot_publication_failure_stops_upgrade_before_changes(
+    tmp_path, monkeypatch
+):
+    module = bootstrap()
+    runtime = tmp_path / "runtime"
+    host = runtime / "astrbot"
+    (host / "data").mkdir(parents=True)
+    (host / "data/memory.db").write_bytes(b"preserved data")
+    receipt = runtime / "desktop-install.json"
+    receipt.write_bytes(b"existing receipt")
+    monkeypatch.setenv("DSWHALE_UV", str(tmp_path / "uv"))
+
+    def publication_unavailable(source, destination):
+        raise OSError("snapshot publication unavailable")
+
+    def unexpected_command(*args, **kwargs):
+        pytest.fail("upgrade continued after backup publication failed")
+
+    monkeypatch.setattr(module.os, "link", publication_unavailable)
+    monkeypatch.setattr(module, "run", unexpected_command)
+    with pytest.raises(OSError, match="snapshot publication unavailable"):
+        module.prepare(tmp_path / "source", runtime)
+
+    assert receipt.read_bytes() == b"existing receipt"
+    assert (host / "data/memory.db").read_bytes() == b"preserved data"
+    assert list((runtime / "backups").iterdir()) == []
+    assert not (runtime / "venv").exists()
+
+
+def test_repair_and_repeat_upgrade_keep_data_and_only_write_explicit_runtime(tmp_path, monkeypatch):
+    module = bootstrap()
+    source = tmp_path / "installed-source"
+    (source / "scripts").mkdir(parents=True)
+    (source / "pyproject.toml").write_text('[project]\nversion = "0.3.0a1"\n')
+    (source / "runtime-lock.json").write_text(
+        (Path(__file__).parents[1] / "runtime-lock.json").read_text()
+    )
+    monkeypatch.setattr(module, "__file__", str(source / "scripts/bootstrap.py"))
+    runtime = tmp_path / "app-data/runtime"
+    host = runtime / "astrbot"
+    (host / "data").mkdir(parents=True)
+    original = {"dashboard": {"host": "127.0.0.1", "port": 6301}, "provider": [{"id": "keep"}]}
+    (host / "data/cmd_config.json").write_text(json.dumps(original))
+    (host / "data/memory.db").write_bytes(b"keep")
+    monkeypatch.setenv("DSWHALE_RUNTIME_DIR", str(runtime))
+    monkeypatch.setenv("DSWHALE_DESKTOP", "1")
+    monkeypatch.setenv("DSWHALE_UV", str(tmp_path / "uv"))
+    assert hasattr(module, "output")
+    commands = []
+
+    def fake_run(args, **kwargs):
+        commands.append([str(item) for item in args])
+        for item in args:
+            if str(item).endswith("[host]"):
+                build_source = Path(str(item).removesuffix("[host]"))
+                assert build_source.is_relative_to(runtime)
+                assert (build_source / "pyproject.toml").is_file()
+        if "venv" in args:
+            venv = next(
+                (Path(str(item)) for item in reversed(args) if str(item).endswith("venv")), None
+            )
+            assert venv is not None
+            python = venv / (
+                "Scripts/python.exe" if __import__("os").name == "nt" else "bin/python"
+            )
+            python.parent.mkdir(parents=True, exist_ok=True)
+            python.touch()
+
+    monkeypatch.setattr(module, "run", fake_run)
+
+    def fake_output(args, **kwargs):
+        if "--version" in args:
+            return "Python 3.12.15"
+        if "ensure_node" in str(args):
+            return str(runtime / "tools/node/bin/node")
+        return json.dumps(
+            {
+                "ffmpeg": str(runtime / "tools/media/ffmpeg"),
+                "ffprobe": str(runtime / "tools/media/ffprobe"),
+            }
+        )
+
+    monkeypatch.setattr(module, "output", fake_output)
+    monkeypatch.setattr(module, "_staged_verify", lambda *args, **kwargs: None)
+    monkeypatch.setattr(module, "_post_activation_verify", lambda *args, **kwargs: {})
+    module.main()
+    module.main()
+    assert json.loads((host / "data/cmd_config.json").read_text()) == original
+    assert (host / "data/memory.db").read_bytes() == b"keep"
+    assert len(list((runtime / "backups").glob("before-upgrade-*.zip"))) == 2
+    assert json.loads((runtime / "desktop-install.json").read_text())["version"] == "0.3.0a1"
+    assert not (source / ".runtime").exists()
+    assert sum("venv" in command for command in commands) == 2
+    assert all("run" not in command or "astrbot.cli" not in command for command in commands)
+
+
+def test_fresh_init_creates_sdk_config_before_loopback_patch_without_starting_host(
+    tmp_path, monkeypatch
+):
+    module = bootstrap()
+    assert hasattr(module, "initialize_host_config")
+    host = tmp_path / "fresh-host"
+    (host / "data").mkdir(parents=True)
+    calls = []
+
+    def sdk_config_only(args, **kwargs):
+        calls.append([str(item) for item in args])
+        assert "-c" in args
+        assert "AstrBotConfig" in args[-1]
+        assert kwargs["cwd"] == host
+        import hashlib
+
+        password = kwargs["env"]["ASTRBOT_DASHBOARD_INITIAL_PASSWORD"]
+        digest = hashlib.pbkdf2_hmac(
+            "sha256", password.encode(), bytes.fromhex("01" * 16), 600000
+        ).hex()
+        # AstrBot CLI init creates directories only. The SDK creates full defaults
+        # and its password hash without starting a host or any platform adapter.
+        (host / "data/cmd_config.json").write_text(
+            json.dumps(
+                {
+                    "dashboard": {
+                        "host": "0.0.0.0",
+                        "pbkdf2_password": f"pbkdf2_sha256$600000${'01' * 16}${digest}",
+                        "password_change_required": True,
+                    },
+                    "provider": [],
+                }
+            )
+        )
+
+    monkeypatch.setattr(module, "run", sdk_config_only)
+    module.initialize_host_config(host, "private-python", {"ASTRBOT_ROOT": str(host)}, desktop=True)
+    config = json.loads((host / "data/cmd_config.json").read_text())
+    assert config["dashboard"]["host"] == "127.0.0.1"
+    assert config["dashboard"]["pbkdf2_password"].startswith("pbkdf2_sha256$600000$")
+    assert config["dashboard"]["password_change_required"] is True
+    assert config["provider"] == []
+    assert len(calls) == 1
+
+
+def test_fresh_desktop_credential_matches_sdk_hash_is_private_and_survives_repair(tmp_path, capfd):
+    import hashlib
+    import hmac
+    import os
+    import stat
+    import sys
+
+    pytest.importorskip("astrbot")
+    module = bootstrap()
+    host = tmp_path / "runtime/astrbot"
+    (host / "data").mkdir(parents=True)
+    env = {**os.environ, "ASTRBOT_ROOT": str(host), "PYTHONUTF8": "1"}
+    module.initialize_host_config(host, sys.executable, env, desktop=True)
+    credential_file = host.parent / "desktop-auth.json"
+    assert credential_file.is_file()
+    saved = credential_file.read_bytes()
+    credential = json.loads(saved)
+    config_file = host / "data/cmd_config.json"
+    config = json.loads(config_file.read_text(encoding="utf-8-sig"))
+    assert set(credential) == {"username", "password"}
+    assert credential["username"] == config["dashboard"]["username"]
+    password = credential["password"]
+    assert len(password) >= 24
+    assert any(char.isupper() for char in password)
+    assert any(char.islower() for char in password)
+    assert any(char.isdigit() for char in password)
+    algorithm, iterations, salt, stored = config["dashboard"]["pbkdf2_password"].split("$")
+    assert algorithm == "pbkdf2_sha256"
+    calculated = hashlib.pbkdf2_hmac(
+        "sha256", password.encode(), bytes.fromhex(salt), int(iterations)
+    )
+    assert hmac.compare_digest(calculated, bytes.fromhex(stored))
+    assert config["dashboard"]["password_change_required"] is True
+    assert config["dashboard"]["host"] == "127.0.0.1"
+    if os.name != "nt":
+        assert stat.S_IMODE(credential_file.stat().st_mode) == 0o600
+    original_config = config_file.read_bytes()
+    module.initialize_host_config(host, "must-not-be-executed", env, desktop=True)
+    assert credential_file.read_bytes() == saved
+    assert config_file.read_bytes() == original_config
+    captured = capfd.readouterr()
+    assert password not in captured.out
+    assert password not in captured.err
+
+
+def test_legacy_init_does_not_store_desktop_credentials(tmp_path, monkeypatch):
+    module = bootstrap()
+    host = tmp_path / "runtime/astrbot"
+    (host / "data").mkdir(parents=True)
+
+    def sdk_config_only(args, **kwargs):
+        assert "ASTRBOT_DASHBOARD_INITIAL_PASSWORD" not in kwargs["env"]
+        (host / "data/cmd_config.json").write_text(json.dumps({"dashboard": {"host": "0.0.0.0"}}))
+
+    monkeypatch.setattr(module, "run", sdk_config_only)
+    module.initialize_host_config(host, "fixture-python", {}, desktop=False)
+    assert not (host.parent / "desktop-auth.json").exists()
+
+
+def test_desktop_initial_credential_refuses_symlink_destination(tmp_path, monkeypatch):
+    module = bootstrap()
+    host = tmp_path / "runtime/astrbot"
+    (host / "data").mkdir(parents=True)
+    outside = tmp_path / "outside.json"
+    outside.write_bytes(b"keep")
+    (host.parent / "desktop-auth.json").symlink_to(outside)
+
+    def no_sdk(args, **kwargs):
+        pytest.fail("SDK must not run for an unsafe credential destination")
+
+    monkeypatch.setattr(module, "run", no_sdk)
+    with pytest.raises(ValueError, match="符号链接"):
+        module.initialize_host_config(host, "fixture-python", {}, desktop=True)
+    assert outside.read_bytes() == b"keep"
+
+
+@pytest.mark.parametrize("failure_point", ["before-sdk", "after-sdk"])
+def test_interrupted_fresh_desktop_init_recovers_same_durable_password(
+    tmp_path, monkeypatch, failure_point
+):
+    import hashlib
+    import hmac
+    import os
+    import stat
+    import sys
+
+    pytest.importorskip("astrbot")
+    module = bootstrap()
+    host = tmp_path / "runtime/astrbot"
+    (host / "data").mkdir(parents=True)
+    env = {**os.environ, "ASTRBOT_ROOT": str(host), "PYTHONUTF8": "1"}
+    sdk_run, configure = module.run, module.configure_desktop_dashboard
+    sdk_calls = []
+
+    def interrupted_sdk(args, **kwargs):
+        sdk_calls.append(kwargs["env"]["ASTRBOT_DASHBOARD_INITIAL_PASSWORD"])
+        if failure_point == "before-sdk":
+            raise RuntimeError("injected before SDK")
+        return sdk_run(args, **kwargs)
+
+    def interrupted_configure(path):
+        raise RuntimeError("injected after SDK")
+
+    monkeypatch.setattr(module, "run", interrupted_sdk)
+    if failure_point == "after-sdk":
+        monkeypatch.setattr(module, "configure_desktop_dashboard", interrupted_configure)
+    with pytest.raises(RuntimeError, match="injected"):
+        module.initialize_host_config(host, sys.executable, env, desktop=True)
+    pending_file = host.parent / ".desktop-auth.pending.json"
+    assert pending_file.is_file()
+    pending = json.loads(pending_file.read_text())
+    password = pending["password"]
+    assert password == sdk_calls[0]
+    if os.name != "nt":
+        assert stat.S_IMODE(pending_file.stat().st_mode) == 0o600
+    config_file = host / "data/cmd_config.json"
+    if failure_point == "after-sdk":
+        assert config_file.is_file()
+        config = json.loads(config_file.read_text(encoding="utf-8-sig"))
+        config["desktopCrashFixture"] = "preserve-user-data"
+        config_file.write_text(json.dumps(config))
+    else:
+        assert not config_file.exists()
+    assert not (host.parent / "desktop-auth.json").exists()
+
+    def resumed_sdk(args, **kwargs):
+        if failure_point == "after-sdk":
+            pytest.fail("Recovery must not rerun SDK initialization against existing config")
+        assert kwargs["env"]["ASTRBOT_DASHBOARD_INITIAL_PASSWORD"] == password
+        return sdk_run(args, **kwargs)
+
+    monkeypatch.setattr(module, "run", resumed_sdk)
+    monkeypatch.setattr(module, "configure_desktop_dashboard", configure)
+    module.initialize_host_config(host, sys.executable, env, desktop=True)
+    saved = json.loads((host.parent / "desktop-auth.json").read_text())
+    assert saved["password"] == password
+    config = json.loads(config_file.read_text(encoding="utf-8-sig"))
+    if failure_point == "after-sdk":
+        assert config["desktopCrashFixture"] == "preserve-user-data"
+    _, iterations, salt, digest = config["dashboard"]["pbkdf2_password"].split("$")
+    calculated = hashlib.pbkdf2_hmac(
+        "sha256", password.encode(), bytes.fromhex(salt), int(iterations)
+    )
+    assert hmac.compare_digest(calculated, bytes.fromhex(digest))
+    assert config["dashboard"]["host"] == "127.0.0.1"
+    assert not pending_file.exists()
+
+
+def test_pending_initialization_never_resets_an_existing_changed_password(tmp_path, monkeypatch):
+    module = bootstrap()
+    host = tmp_path / "runtime/astrbot"
+    (host / "data").mkdir(parents=True)
+    config_file = host / "data/cmd_config.json"
+    config_file.write_text(
+        json.dumps(
+            {
+                "dashboard": {
+                    "host": "0.0.0.0",
+                    "username": "astrbot",
+                    "pbkdf2_password": "changed-by-user",
+                },
+                "provider": [{"id": "keep"}],
+            }
+        )
+    )
+    original = config_file.read_bytes()
+    (host.parent / ".desktop-auth.pending.json").write_text(
+        json.dumps(
+            {
+                "format": 1,
+                "purpose": "dswhale-desktop-initial-login",
+                "username": "astrbot",
+                "password": "SyntheticPendingPassword123",
+            }
+        )
+    )
+
+    def must_not_run(args, **kwargs):
+        pytest.fail("Existing config must never rerun the SDK or reset its password")
+
+    monkeypatch.setattr(module, "run", must_not_run)
+    with pytest.raises(ValueError, match="登录|密码"):
+        module.initialize_host_config(host, "must-not-run", {}, desktop=True)
+    assert config_file.read_bytes() == original
+    assert not (host.parent / "desktop-auth.json").exists()
+
+
+def fake_bootstrap_entry(tmp_path, monkeypatch, *, desktop):
+    """Exercise the real main/prepare flow while replacing external installers."""
+    import os
+
+    module = bootstrap()
+    source = tmp_path / "source"
+    (source / "scripts").mkdir(parents=True)
+    (source / "pyproject.toml").write_text('[project]\nversion = "0.3.0a1"\n')
+    (source / "runtime-lock.json").write_text(
+        (Path(__file__).parents[1] / "runtime-lock.json").read_text()
+    )
+    monkeypatch.setattr(module, "__file__", str(source / "scripts/bootstrap.py"))
+    runtime = tmp_path / "runtime"
+    monkeypatch.setenv("DSWHALE_RUNTIME_DIR", str(runtime))
+    monkeypatch.setenv("DSWHALE_UV", str(tmp_path / "fixture-uv"))
+    if desktop:
+        monkeypatch.setenv("DSWHALE_DESKTOP", "1")
+    else:
+        monkeypatch.delenv("DSWHALE_DESKTOP", raising=False)
+    commands = []
+
+    def external_installer(args, **kwargs):
+        command = [str(item) for item in args]
+        commands.append(command)
+        if "venv" in command:
+            venv = next((Path(item) for item in reversed(command) if item.endswith("venv")), None)
+            assert venv is not None
+            python = venv / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+            python.parent.mkdir(parents=True, exist_ok=True)
+            python.touch()
+        if "astrbot.cli" in command:
+            assert "init" in command and "run" not in command
+            target = Path(kwargs.get("cwd") or runtime / "astrbot")
+            (target / "data").mkdir(parents=True, exist_ok=True)
+        if "dswhale" in command and "install" in command:
+            target = Path(command[command.index("--astrbot-dir") + 1])
+            for plugin in ("astrbot_plugin_dswhale", "astrbot_plugin_livingmemory"):
+                directory = target / "data/plugins" / plugin
+                directory.mkdir(parents=True, exist_ok=True)
+                (directory / "main.py").write_text("# fixture\n")
+                if plugin.endswith("livingmemory"):
+                    (directory / "requirements.txt").write_text("")
+        if "-c" in command and "AstrBotConfig" in command[-1]:
+            pytest.fail("This entry scenario must never initialize SDK config")
+
+    def tool_output(args, **kwargs):
+        if "--version" in args:
+            return "Python 3.12.15"
+        script = str(args)
+        if "dswhale_plugin" in script:
+            return json.dumps(
+                {
+                    "dswhale": "0.3.0a1",
+                    "astrbot": "4.29.4",
+                    "config": True,
+                    "dswhale_plugin": True,
+                    "memory_plugin": True,
+                    "db": "ok",
+                    "plugins_compile": True,
+                    "module": True,
+                }
+            )
+        if "metadata.version('dswhale')" in script or 'metadata.version("dswhale")' in script:
+            return json.dumps(
+                {
+                    "dswhale": "0.3.0a1",
+                    "astrbot": "4.29.4",
+                    "python": "3.12.15",
+                    "node": "22.23.4",
+                    "ffmpeg": "9.0.2",
+                }
+            )
+        if "ensure_node" in script:
+            return str(runtime / "tools/node/bin/node")
+        return json.dumps(
+            {
+                "ffmpeg": str(runtime / "tools/media/ffmpeg"),
+                "ffprobe": str(runtime / "tools/media/ffprobe"),
+            }
+        )
+
+    monkeypatch.setattr(module, "run", external_installer)
+    monkeypatch.setattr(module, "output", tool_output)
+    return module, runtime, commands
+
+
+def test_main_retry_recovers_pending_login_after_sdk_already_created_config(tmp_path, monkeypatch):
+    import hashlib
+
+    module, runtime, commands = fake_bootstrap_entry(tmp_path, monkeypatch, desktop=True)
+    monkeypatch.setattr(module, "_post_activation_verify", lambda *args: {})
+    host = runtime / "astrbot"
+    (host / "data").mkdir(parents=True)
+    password = "SyntheticDurablePendingPassword123"
+    salt = "01" * 16
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode(), bytes.fromhex(salt), 600000).hex()
+    config = {
+        "dashboard": {
+            "username": "astrbot",
+            "host": "0.0.0.0",
+            "pbkdf2_password": f"pbkdf2_sha256$600000${salt}${digest}",
+        },
+        "provider": [{"id": "preserve"}],
+    }
+    config_file = host / "data/cmd_config.json"
+    config_file.write_text(json.dumps(config))
+    pending_file = runtime / ".desktop-auth.pending.json"
+    pending_file.write_text(
+        json.dumps(
+            {
+                "format": 1,
+                "purpose": "dswhale-desktop-initial-login",
+                "username": "astrbot",
+                "password": password,
+            }
+        )
+    )
+    pending_file.chmod(0o600)
+    module.main()
+    assert (runtime / "desktop-auth.json").is_file()
+    assert json.loads((runtime / "desktop-auth.json").read_text()) == {
+        "username": "astrbot",
+        "password": password,
+    }
+    assert not pending_file.exists()
+    final_config = json.loads(config_file.read_text())
+    assert final_config["dashboard"]["host"] == "127.0.0.1"
+    assert final_config["dashboard"]["pbkdf2_password"] == config["dashboard"]["pbkdf2_password"]
+    assert final_config["provider"] == [{"id": "preserve"}]
+    assert not any("astrbot.cli" in command for command in commands)
+
+
+def test_legacy_main_leaves_sdk_password_creation_to_start(tmp_path, monkeypatch):
+    module, runtime, commands = fake_bootstrap_entry(tmp_path, monkeypatch, desktop=False)
+    monkeypatch.setattr(module, "_post_activation_verify", lambda *args: {})
+    module.main()
+    assert any("astrbot.cli" in command and "init" in command for command in commands)
+    assert not (runtime / "astrbot/data/cmd_config.json").exists()
+    assert not (runtime / "desktop-auth.json").exists()
+    assert not (runtime / ".desktop-auth.pending.json").exists()
+
+
+def test_bootstrap_receipt_records_expected_and_actual_versions_without_private_environment(
+    tmp_path, monkeypatch
+):
+    module = bootstrap()
+    assert hasattr(module, "runtime_receipt")
+    monkeypatch.setenv("HTTPS_PROXY", "http://user:PRIVATE@localhost:7890")
+    actual = {
+        "dswhale": "0.3.0a3",
+        "astrbot": "4.29.4",
+        "python": "3.12.15",
+        "node": "22.23.4",
+        "ffmpeg": "9.0.2",
+    }
+    monkeypatch.setattr(module, "output", lambda *args, **kwargs: json.dumps(actual))
+    receipt = module.runtime_receipt("0.3.0a3", "python", "node", "ffmpeg", {})
+    assert receipt["format"] == 2
+    assert receipt["versions"] == actual
+    assert receipt["channel"] == "alpha"
+    assert receipt["expected"]["dswhale"] == "0.3.0a3"
+    assert receipt["expected"]["astrbot"] == "4.29.4"
+    assert "PRIVATE" not in json.dumps(receipt)
+
+
+def test_bootstrap_network_policy_is_applied_before_installer_runs(tmp_path, monkeypatch):
+    module, runtime, commands = fake_bootstrap_entry(tmp_path, monkeypatch, desktop=False)
+    monkeypatch.setattr(module, "_post_activation_verify", lambda *args: {})
+    runtime.mkdir()
+    (runtime / "network.json").write_text(
+        json.dumps(
+            {
+                "mode": "custom",
+                "proxyUrl": "http://127.0.0.1:7890",
+                "pypiIndex": "https://pypi.test/simple",
+                "npmRegistry": "https://npm.test/",
+            }
+        )
+    )
+    original = module.run
+    environments = []
+
+    def check_environment(args, **kwargs):
+        environments.append(kwargs.get("env", {}))
+        return original(args, **kwargs)
+
+    monkeypatch.setattr(module, "run", check_environment)
+    module.main()
+    assert environments
+    assert all(env.get("HTTPS_PROXY") == "http://127.0.0.1:7890/" for env in environments)
+    assert all(env.get("UV_DEFAULT_INDEX") == "https://pypi.test/simple" for env in environments)
+    assert all(
+        env.get("DSWHALE_NETWORK_CONFIG") == str(runtime / "network.json") for env in environments
+    )
+
+
+def test_bootstrap_propagates_only_allowlisted_network_failure_metadata(monkeypatch):
+    import subprocess
+
+    module = bootstrap()
+
+    def failed_download(*args, **kwargs):
+        raise subprocess.CalledProcessError(
+            1,
+            ["private-path"],
+            output='PRIVATE secret\nDSWHALE_NETWORK_ERROR {"code":"NET_PROXY","source":"nodejs"}\n',
+        )
+
+    monkeypatch.setattr(module.subprocess, "check_output", failed_download)
+    with pytest.raises(ValueError) as failure:
+        module.output(["private-command"])
+    assert getattr(failure.value, "code", "") == "NET_PROXY"
+    assert getattr(failure.value, "source", "") == "nodejs"
+    assert "PRIVATE" not in str(failure.value)
+
+
+def test_dashboard_configuration_does_not_import_host_packages(tmp_path, monkeypatch):
+    import builtins
+
+    module = bootstrap()
+    file = tmp_path / "data/cmd_config.json"
+    file.parent.mkdir()
+    file.write_text(json.dumps({"dashboard": {"port": 6185}}))
+    original = builtins.__import__
+
+    def isolated(name, *args, **kwargs):
+        if name.split(".")[0] in {"astrbot", "dswhale"}:
+            raise ModuleNotFoundError("Host package is not in the bootstrap environment")
+        return original(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", isolated)
+    module.configure_desktop_dashboard(tmp_path)
+    assert json.loads(file.read_text())["dashboard"]["host"] == "127.0.0.1"
+
+
+def test_existing_desktop_upgrade_repairs_categories_through_host_python(tmp_path):
+    import os
+    import sys
+
+    module = bootstrap()
+    host = tmp_path / "host"
+    file = host / "data/cmd_config.json"
+    file.parent.mkdir(parents=True)
+    source = {"id": "synthetic-source", "type": "openai_responses", "key": ["SYNTHETIC-KEY"]}
+    config = {"provider_sources": [source], "dashboard": {"username": "existing-user"}}
+    file.write_text(json.dumps(config))
+    env = {**os.environ, "PYTHONPATH": str(Path(__file__).parents[1])}
+    module.initialize_host_config(host, sys.executable, env, desktop=True)
+    after = json.loads(file.read_text())
+    assert after["provider_sources"] == [{**source, "provider_type": "chat_completion"}]
+    assert after["dashboard"] == config["dashboard"]
+    assert not (host.parent / "desktop-auth.json").exists()
+
+
+def test_desktop_init_applies_additive_migration_after_provider_repair(tmp_path, monkeypatch):
+    module = bootstrap()
+    host = tmp_path / "runtime/astrbot"
+    (host / "data/config").mkdir(parents=True)
+    config = {
+        "dashboard": {"host": "127.0.0.1", "port": 6185},
+        "provider_sources": [{"id": "source", "key": ["SYNTHETIC-KEY"]}],
+        "provider": [{"id": "model", "model": "cloud-model", "enable": True}],
+    }
+    fish = {
+        "owner_qq": "123456789",
+        "owner_umo": "old-qq:FriendMessage:123456789",
+        "proactive_enabled": True,
+        "bili_enabled": True,
+        "qq_signature_enabled": True,
+        "qzone_enabled": True,
+        "persona": "SYNTHETIC-PRIVATE-PERSONA",
+    }
+    config_file = host / "data/cmd_config.json"
+    fish_file = host / "data/config/astrbot_plugin_dswhale_config.json"
+    config_file.write_text(json.dumps(config), encoding="utf-8")
+    fish_file.write_text(json.dumps(fish), encoding="utf-8")
+    calls = []
+
+    def fake_run(args, **kwargs):
+        calls.append([str(item) for item in args])
+        if "migrate" in [str(item) for item in args]:
+            from dswhale.desktop_settings import migrate_settings
+
+            migrate_settings(host)
+
+    monkeypatch.setattr(module, "run", fake_run)
+    module.initialize_host_config(host, "managed-python", {"ASTRBOT_ROOT": str(host)}, desktop=True)
+    assert any("migrate" in call for call in calls)
+    migrated = json.loads(fish_file.read_text(encoding="utf-8"))
+    for key, value in fish.items():
+        assert migrated[key] == (
+            {
+                "qq_connection_mode": "official",
+                "qq_default_delivery": "official",
+                "qq_signature_enabled": False,
+                "qzone_enabled": False,
+            }.get(key, value)
+        ), key
+    assert migrated["qq_default_delivery"] == "official"
+    assert migrated["config_migration_version"] == 2
+    assert json.loads(config_file.read_text())["provider_sources"] == config["provider_sources"]
+
+
+def test_repeat_prepare_migration_uses_one_real_host_lock(tmp_path, monkeypatch):
+    """An upgrade with existing settings must run the migration child as the
+    single holder of the real host FileLock (fresh, existing, repeat, failure)."""
+    import os
+    import shutil
+    import subprocess
+    import sys
+
+    from filelock import FileLock
+
+    module = bootstrap()
+    source = tmp_path / "installed-source"
+    (source / "scripts").mkdir(parents=True)
+    (source / "pyproject.toml").write_text('[project]\nversion = "0.3.0a10"\n')
+    (source / "runtime-lock.json").write_text(
+        (Path(__file__).parents[1] / "runtime-lock.json").read_text()
+    )
+    monkeypatch.setattr(module, "__file__", str(source / "scripts/bootstrap.py"))
+    runtime = tmp_path / "app-data/runtime"
+    host = runtime / "astrbot"
+    (host / "data").mkdir(parents=True)
+    monkeypatch.setenv("DSWHALE_RUNTIME_DIR", str(runtime))
+    monkeypatch.setenv("DSWHALE_DESKTOP", "1")
+    monkeypatch.setenv("DSWHALE_UV", str(tmp_path / "uv"))
+    repo = Path(__file__).parents[1]
+    migrations = []
+
+    def fake_run(args, **kwargs):
+        values = [str(item) for item in args]
+        target = Path(kwargs.get("cwd") or host)
+        if "venv" in values:
+            venv = next((Path(item) for item in reversed(values) if item.endswith("venv")), None)
+            assert venv is not None
+            python = venv / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+            python.parent.mkdir(parents=True, exist_ok=True)
+            python.touch()
+            return
+        if "astrbot.cli" in values and "init" in values:
+            (target / "data").mkdir(parents=True, exist_ok=True)
+            (target / "data/cmd_config.json").write_text(
+                json.dumps({"dashboard": {"host": "0.0.0.0", "port": 6185}, "provider": []})
+            )
+            return
+        if values[1:3] == ["-m", "dswhale"] and "install" in values:
+            plugin = target / "data/plugins/astrbot_plugin_dswhale"
+            plugin.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(repo / "_conf_schema.json", plugin / "_conf_schema.json")
+            for name in ("main.py",):
+                (plugin / name).write_text("# fixture\n")
+            memory = target / "data/plugins/astrbot_plugin_livingmemory"
+            memory.mkdir(parents=True, exist_ok=True)
+            (memory / "main.py").write_text("# fixture\n")
+            (memory / "requirements.txt").write_text("")
+            return
+        if values[1:4] == ["-m", "dswhale.desktop_settings", "migrate"]:
+            migrations.append(values)
+            migration_env = {
+                **os.environ,
+                **{key: str(value) for key, value in (kwargs.get("env") or {}).items()},
+            }
+            migration_env["PYTHONPATH"] = os.pathsep.join(
+                [str(repo), migration_env.get("PYTHONPATH", "")]
+            ).strip(os.pathsep)
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "dswhale.desktop_settings",
+                    "migrate",
+                    "--host",
+                    str(kwargs.get("cwd") or host),
+                ],
+                cwd=repo,
+                env=migration_env,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                timeout=120,
+            )
+            if completed.returncode != 0:
+                raise subprocess.CalledProcessError(
+                    completed.returncode, values, completed.stdout, completed.stderr
+                )
+            return
+        # Every other bootstrap command is synthetic: no packages, platforms or
+        # network are ever started by this test.
+        return
+
+    def fake_output(args, **kwargs):
+        if "--version" in [str(item) for item in args]:
+            return "Python 3.12.15"
+        if "ensure_node" in " ".join(str(item) for item in args):
+            return str(runtime / "tools/node/bin/node")
+        return json.dumps(
+            {
+                "ffmpeg": str(runtime / "tools/media/ffmpeg"),
+                "ffprobe": str(runtime / "tools/media/ffprobe"),
+            }
+        )
+
+    monkeypatch.setattr(module, "run", fake_run)
+    monkeypatch.setattr(module, "output", fake_output)
+    monkeypatch.setattr(module, "_staged_verify", lambda *args, **kwargs: None)
+    monkeypatch.setattr(module, "_post_activation_verify", lambda *args, **kwargs: {})
+
+    # 1. Fresh install: no fish settings yet, so no migration child is needed.
+    module.main()
+    module._finalize_activation(runtime)
+    receipt = runtime / "desktop-install.json"
+    assert json.loads(receipt.read_text())["version"] == "0.3.0a10"
+    assert migrations == []
+
+    # 2. Existing install with old fish settings: the child must take the real
+    #    host lock after the parent released it.
+    fish_file = host / "data/config/astrbot_plugin_dswhale_config.json"
+    fish_file.parent.mkdir(parents=True)
+    fish = {
+        "owner_qq": "123456789",
+        "owner_umo": "old-qq:FriendMessage:123456789",
+        "proactive_enabled": True,
+        "persona": "SYNTHETIC-PRIVATE-PERSONA",
+    }
+    fish_file.write_text(json.dumps(fish), encoding="utf-8")
+    module.main()
+    module._finalize_activation(runtime)
+    assert len(migrations) == 1
+    migrated = json.loads(fish_file.read_text(encoding="utf-8"))
+    for key, value in fish.items():
+        assert migrated[key] == (
+            {
+                "qq_connection_mode": "official",
+                "qq_default_delivery": "official",
+                "qq_signature_enabled": False,
+                "qzone_enabled": False,
+            }.get(key, value)
+        ), key
+    assert migrated["qq_default_delivery"] == "official"
+    assert migrated["config_migration_version"] == 2
+    assert json.loads(receipt.read_text())["version"] == "0.3.0a10"
+
+    # 3. Repeated upgrade: idempotent, still one lock owner per run.
+    module.main()
+    module._finalize_activation(runtime)
+    assert len(migrations) == 2
+    assert json.loads(fish_file.read_text(encoding="utf-8")) == migrated
+    assert json.loads(receipt.read_text())["version"] == "0.3.0a10"
+
+    # 4. A failing child migration must abort the upgrade before any receipt,
+    #    leave the corrupt settings untouched and leave the host lock free.
+    corrupt = b"{not json after a failed migration"
+    fish_file.write_bytes(corrupt)
+    with pytest.raises(subprocess.CalledProcessError):
+        module.main()
+    assert json.loads(receipt.read_text())["version"] == "0.3.0a10"
+    assert (host / "data/config/astrbot_plugin_dswhale_config.json").read_bytes() == corrupt
+    with FileLock(host / "astrbot.lock", timeout=0):
+        pass
+
+
+def test_upgrade_first_sdk_read_preserves_supported_values_and_migration_receipt(
+    tmp_path, monkeypatch
+):
+    """The production prepare flow performs the first fixed-SDK plugin read,
+    keeps supported values and the migration receipt, archives legacy values
+    the schema cannot represent, and aborts before the install receipt."""
+    import os
+    import shutil
+    import subprocess
+    import sys
+
+    module = bootstrap()
+    source = tmp_path / "installed-source"
+    (source / "scripts").mkdir(parents=True)
+    (source / "pyproject.toml").write_text('[project]\nversion = "0.3.0a10"\n')
+    (source / "runtime-lock.json").write_text(
+        (Path(__file__).parents[1] / "runtime-lock.json").read_text()
+    )
+    monkeypatch.setattr(module, "__file__", str(source / "scripts/bootstrap.py"))
+    runtime = tmp_path / "app-data/runtime"
+    host = runtime / "astrbot"
+    (host / "data").mkdir(parents=True)
+    monkeypatch.setenv("DSWHALE_RUNTIME_DIR", str(runtime))
+    monkeypatch.setenv("DSWHALE_DESKTOP", "1")
+    monkeypatch.setenv("DSWHALE_UV", str(tmp_path / "uv"))
+    repo = Path(__file__).parents[1]
+    migrations = []
+    verifications = []
+    ordered = []
+    invalid_schema = {"value": False}
+
+    def child_environment(kwargs):
+        env = {
+            **os.environ,
+            **{key: str(value) for key, value in (kwargs.get("env") or {}).items()},
+        }
+        env["PYTHONPATH"] = os.pathsep.join([str(repo), env.get("PYTHONPATH", "")]).strip(
+            os.pathsep
+        )
+        return env
+
+    def real_child(arguments, kwargs):
+        completed = subprocess.run(
+            [sys.executable, *arguments],
+            cwd=repo,
+            env=child_environment(kwargs),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            timeout=180,
+        )
+        if completed.returncode != 0:
+            raise subprocess.CalledProcessError(
+                completed.returncode, arguments, completed.stdout, completed.stderr
+            )
+
+    def fake_run(args, **kwargs):
+        values = [str(item) for item in args]
+        target_host = Path(kwargs.get("cwd") or host)
+        if "venv" in values:
+            venv = next((Path(item) for item in reversed(values) if item.endswith("venv")), None)
+            assert venv is not None
+            python = venv / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+            python.parent.mkdir(parents=True, exist_ok=True)
+            python.touch()
+            return
+        if "astrbot.cli" in values and "init" in values:
+            (target_host / "data").mkdir(parents=True, exist_ok=True)
+            (target_host / "data/cmd_config.json").write_text(
+                json.dumps({"dashboard": {"host": "0.0.0.0", "port": 6185}, "provider": []})
+            )
+            return
+        if values[1:3] == ["-m", "dswhale"] and "install" in values:
+            ordered.append("install")
+            plugin = target_host / "data/plugins/astrbot_plugin_dswhale"
+            plugin.mkdir(parents=True, exist_ok=True)
+            target = plugin / "_conf_schema.json"
+            if invalid_schema["value"]:
+                target.write_text("{not a schema", encoding="utf-8")
+            else:
+                shutil.copy2(repo / "_conf_schema.json", target)
+            (plugin / "main.py").write_text("# fixture\n")
+            memory = target_host / "data/plugins/astrbot_plugin_livingmemory"
+            memory.mkdir(parents=True, exist_ok=True)
+            (memory / "main.py").write_text("# fixture\n")
+            (memory / "requirements.txt").write_text("")
+            return
+        if values[1:4] == ["-m", "dswhale.desktop_settings", "migrate"]:
+            ordered.append("migrate")
+            migrations.append(values)
+            real_child(
+                [
+                    "-m",
+                    "dswhale.desktop_settings",
+                    "migrate",
+                    "--host",
+                    str(kwargs.get("cwd") or host),
+                ],
+                kwargs,
+            )
+            return
+        if values[1:3] == ["-m", "dswhale.upgrade_verify"]:
+            ordered.append("verify")
+            verifications.append(values)
+            real_child(
+                ["-m", "dswhale.upgrade_verify", "--host", str(kwargs.get("cwd") or host)], kwargs
+            )
+            return
+        return
+
+    def fake_output(args, **kwargs):
+        if "--version" in [str(item) for item in args]:
+            return "Python 3.12.15"
+        if "ensure_node" in " ".join(str(item) for item in args):
+            return str(runtime / "tools/node/bin/node")
+        return json.dumps(
+            {
+                "ffmpeg": str(runtime / "tools/media/ffmpeg"),
+                "ffprobe": str(runtime / "tools/media/ffprobe"),
+            }
+        )
+
+    monkeypatch.setattr(module, "run", fake_run)
+    monkeypatch.setattr(module, "output", fake_output)
+    monkeypatch.setattr(module, "_staged_verify", lambda *args, **kwargs: None)
+    monkeypatch.setattr(module, "_post_activation_verify", lambda *args, **kwargs: {})
+    receipt = runtime / "desktop-install.json"
+
+    # Fresh install has no plugin settings yet, so no first-read verification.
+    module.main()
+    module._finalize_activation(runtime)
+    assert migrations == [] and verifications == []
+    assert json.loads(receipt.read_text())["version"] == "0.3.0a10"
+
+    # Existing upgrade: migration runs first, then install, then the real
+    # fixed-SDK first read, all before the install receipt is written.
+    fish_file = host / "data/config/astrbot_plugin_dswhale_config.json"
+    fish_file.parent.mkdir(parents=True)
+    fish = {
+        "owner_qq": "123456789",
+        "owner_umo": "old-qq:FriendMessage:123456789",
+        "proactive_enabled": False,
+        "daily_limit": 0,
+        "quiet_end": "",
+        "persona": "SYNTHETIC-PRIVATE-PERSONA",
+        "legacy_unknown_field": {"a": [1, 2, 3]},
+        "legacy_empty_dict": {},
+        "legacy_empty_list": [],
+    }
+    fish_file.write_text(json.dumps(fish), encoding="utf-8")
+    module.main()
+    module._finalize_activation(runtime)
+    assert migrations and verifications
+    assert ordered[-2:] == ["install", "verify"]
+    saved = json.loads(fish_file.read_text(encoding="utf-8"))
+    assert saved["proactive_enabled"] is False
+    assert saved["daily_limit"] == 0
+    assert saved["quiet_end"] == ""
+    assert saved["persona"] == fish["persona"]
+    assert "owner_umo" not in saved
+    assert saved["config_migration_version"] == 2
+    assert "legacy_unknown_field" not in saved
+    receipts = host / "data/plugin_data/astrbot_plugin_dswhale/config-migration-receipt.json"
+    receipt_value = json.loads(receipts.read_text(encoding="utf-8"))
+    assert receipt_value["migrationVersion"] == 2
+    import importlib.metadata
+
+    assert receipt_value["sdkVersion"] == importlib.metadata.version("astrbot")
+    assert set(receipt_value["archivedFields"]) >= {
+        "legacy_unknown_field",
+        "legacy_empty_dict",
+        "legacy_empty_list",
+    }
+    archive_file = host / receipt_value["archiveFile"]
+    archived = json.loads(archive_file.read_text(encoding="utf-8"))
+    assert archived["fields"]["owner_umo"] == fish["owner_umo"]
+    assert archived["fields"]["legacy_unknown_field"] == fish["legacy_unknown_field"]
+    assert archived["fields"]["legacy_empty_dict"] == {}
+    _assert_private_files(archive_file, receipts)
+    assert json.loads(receipt.read_text())["version"] == "0.3.0a10"
+
+    # Second upgrade pass is idempotent: no new archive and stable values.
+    archives = list((host / "data/config/.dswhale-config-archives").glob("*.json"))
+    module.main()
+    module._finalize_activation(runtime)
+    assert len(verifications) >= 2
+    assert list((host / "data/config/.dswhale-config-archives").glob("*.json")) == archives
+    repeat = json.loads(fish_file.read_text(encoding="utf-8"))
+    assert repeat == saved
+    assert json.loads(receipts.read_text(encoding="utf-8"))["normalizedConfig"] is False
+
+    # A failed verification aborts before the install receipt and does not
+    # rewrite the already normalized settings.
+    before_failure = fish_file.read_bytes()
+    invalid_schema["value"] = True
+    with pytest.raises(subprocess.CalledProcessError):
+        module.main()
+    assert json.loads(receipt.read_text())["version"] == "0.3.0a10"
+    assert fish_file.read_bytes() == before_failure
+    assert json.loads(receipts.read_text(encoding="utf-8"))["migrationVersion"] == 2
+
+
+def _staging_prepare_fixture(tmp_path, monkeypatch):
+    """A real prepare() run whose external tools are replaced by private fixtures."""
+    module = bootstrap()
+    source = tmp_path / "source"
+    (source / "scripts").mkdir(parents=True)
+    (source / "pyproject.toml").write_text('[project]\nversion = "0.4.0a1"\n')
+    (source / "runtime-lock.json").write_text(
+        (Path(__file__).parents[1] / "runtime-lock.json").read_text()
+    )
+    monkeypatch.setattr(module, "__file__", str(source / "scripts/bootstrap.py"))
+    runtime = tmp_path / "runtime"
+    host = runtime / "astrbot"
+    (host / "data").mkdir(parents=True)
+    original_config = json.dumps({"dashboard": {"host": "127.0.0.1", "port": 6301}}).encode()
+    (host / "data/cmd_config.json").write_bytes(original_config)
+    (host / "data/memory.db").write_bytes(b"keep-memory")
+    venv = runtime / "venv"
+    python = venv / ("Scripts/python.exe" if __import__("os").name == "nt" else "bin/python")
+    python.parent.mkdir(parents=True)
+    python.write_text("old python")
+    receipt = runtime / "desktop-install.json"
+    receipt.write_text('{"format":1,"version":"0.3.0a14"}')
+    (runtime / "tool-env.json").write_text('{"node":"old"}')
+    monkeypatch.setenv("DSWHALE_RUNTIME_DIR", str(runtime))
+    monkeypatch.setenv("DSWHALE_UV", str(tmp_path / "uv"))
+    monkeypatch.setenv("DSWHALE_DESKTOP", "1")
+    node = runtime / "tools/node/bin/node"
+    media = {
+        "ffmpeg": str(runtime / "tools/media/ffmpeg"),
+        "ffprobe": str(runtime / "tools/media/ffprobe"),
+    }
+
+    def fake_run(args, **kwargs):
+        command = [str(item) for item in args]
+        if "venv" in command and "--clear" in command:
+            target = Path(command[command.index("--clear") + 1])
+            path = target / (
+                "Scripts/python.exe" if __import__("os").name == "nt" else "bin/python"
+            )
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("staging python")
+        return None
+
+    def fake_output(args, **kwargs):
+        if "--version" in args:
+            return "Python 3.12.15"
+        script = str(args)
+        if "ensure_node" in script:
+            return str(node)
+        if "ensure_media" in script:
+            return json.dumps(media)
+        if "metadata.version" in script and "dswhale" in script:
+            return json.dumps(
+                {
+                    "dswhale": "0.4.0a1",
+                    "astrbot": "4.29.4",
+                    "python": "3.12.15",
+                    "node": "22.23.4",
+                    "ffmpeg": "9.0.2",
+                }
+            )
+        if "ASTRBOT_ROOT" in script:
+            return json.dumps(
+                {
+                    "dswhale": "0.4.0a1",
+                    "astrbot": "4.29.4",
+                    "config": True,
+                    "dswhale_plugin": True,
+                    "memory_plugin": True,
+                }
+            )
+        return json.dumps(media)
+
+    monkeypatch.setattr(module, "run", fake_run)
+    monkeypatch.setattr(module, "output", fake_output)
+    monkeypatch.setattr(module, "initialize_host_config", lambda *args, **kwargs: None)
+    monkeypatch.setattr(module, "migrate_desktop_settings", lambda *args, **kwargs: None)
+    monkeypatch.setattr(module, "verify_desktop_settings", lambda *args, **kwargs: None)
+    return module, runtime, host, original_config, receipt, venv
+
+
+@pytest.mark.parametrize(
+    "failure_point", ["dependency", "plugin", "migration", "memory", "readiness"]
+)
+def test_staged_prepare_failure_keeps_old_core_data_and_receipt(
+    tmp_path, monkeypatch, failure_point
+):
+    module, runtime, host, original_config, receipt, venv = _staging_prepare_fixture(
+        tmp_path, monkeypatch
+    )
+    receipt_bytes = receipt.read_bytes()
+    if failure_point == "migration":
+        monkeypatch.setattr(
+            module,
+            "migrate_desktop_settings",
+            lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("migration failed")),
+        )
+    if failure_point == "readiness":
+        monkeypatch.setattr(
+            module,
+            "_staged_verify",
+            lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("readiness failed")),
+        )
+    original_run = module.run
+
+    def failing_run(args, **kwargs):
+        command = [str(item) for item in args]
+        if failure_point == "dependency" and "pip" in command and "install" in command:
+            raise RuntimeError("dependency resolve failed")
+        if failure_point == "plugin" and "dswhale" in command and "install" in command:
+            raise RuntimeError("plugin copy failed")
+        if (
+            failure_point == "memory"
+            and "-r" in command
+            and any("livingmemory" in item for item in command)
+        ):
+            raise RuntimeError("memory deps failed")
+        return original_run(args, **kwargs)
+
+    monkeypatch.setattr(module, "run", failing_run)
+    with pytest.raises(RuntimeError):
+        module.prepare(Path(module.__file__).resolve().parents[1], runtime)
+    assert (host / "data/cmd_config.json").read_bytes() == original_config
+    assert (host / "data/memory.db").read_bytes() == b"keep-memory"
+    assert receipt.read_bytes() == receipt_bytes
+    assert (
+        venv / ("Scripts/python.exe" if __import__("os").name == "nt" else "bin/python")
+    ).read_text() == "old python"
+    assert (runtime / "tool-env.json").read_text() == '{"node":"old"}'
+    assert not (runtime / "host.previous").exists()
+    assert list((runtime / "staging-failed").glob("*")), "failed staging is retained for forensics"
+
+
+def test_activate_swap_failure_restores_old_host_and_venv(tmp_path, monkeypatch):
+    module = bootstrap()
+    runtime = tmp_path / "runtime"
+    host = runtime / "astrbot"
+    (host / "data").mkdir(parents=True)
+    (host / "data/memory.db").write_bytes(b"old")
+    venv = runtime / "venv"
+    (venv / "bin").mkdir(parents=True)
+    (venv / "bin/python").write_text("old")
+    staging = runtime / "staging/build"
+    staging_host = staging / "host"
+    (staging_host / "data").mkdir(parents=True)
+    (staging_host / "data/memory.db").write_bytes(b"new")
+    staging_venv = staging / "venv"
+    (staging_venv / "bin").mkdir(parents=True)
+    (staging_venv / "bin/python").write_text("new")
+    real_replace = Path.replace
+
+    def replace(self, target):
+        if self == staging_host and Path(target) == host:
+            raise OSError("simulated swap failure")
+        return real_replace(self, target)
+
+    monkeypatch.setattr(Path, "replace", replace)
+    with pytest.raises(OSError, match="simulated swap failure"):
+        module._activate(runtime, host, staging, staging_host, staging_venv, True)
+    assert (host / "data/memory.db").read_bytes() == b"old"
+    assert (venv / "bin/python").read_text() == "old"
+    assert not (runtime / "host.previous").exists()
+    assert not (runtime / "venv.previous").exists()
+
+
+def _activation_fixture(tmp_path):
+    runtime = tmp_path / "runtime"
+    host = runtime / "astrbot"
+    (host / "data").mkdir(parents=True)
+    (host / "data/memory.db").write_bytes(b"old")
+    venv = runtime / "venv"
+    (venv / "bin").mkdir(parents=True)
+    (venv / "bin/python").write_text("old python")
+    (runtime / "tool-env.json").write_text('{"node":"old"}')
+    (runtime / "desktop-install.json").write_text("old receipt")
+    staging = runtime / "staging/build"
+    staging_host = staging / "host"
+    (staging_host / "data").mkdir(parents=True)
+    (staging_host / "data/memory.db").write_bytes(b"new")
+    staging_venv = staging / "venv"
+    (staging_venv / "bin").mkdir(parents=True)
+    (staging_venv / "bin/python").write_text("new python")
+    (staging / "tool-env.json").write_text('{"node":"new"}')
+    (staging / "desktop-install.json").write_text("new receipt")
+    return runtime, host, venv, staging, staging_host, staging_venv
+
+
+def test_activate_metadata_failure_restores_every_generation_file(tmp_path, monkeypatch):
+    module = bootstrap()
+    runtime, host, venv, staging, staging_host, staging_venv = _activation_fixture(tmp_path)
+    real_replace = Path.replace
+
+    def replace(self, target):
+        if Path(target) == runtime / "tool-env.json" and self == staging / "tool-env.json":
+            raise OSError("simulated metadata failure")
+        return real_replace(self, target)
+
+    monkeypatch.setattr(Path, "replace", replace)
+    with pytest.raises(OSError, match="simulated metadata failure"):
+        module._activate(runtime, host, staging, staging_host, staging_venv, True)
+    assert (host / "data/memory.db").read_bytes() == b"old"
+    assert (venv / "bin/python").read_text() == "old python"
+    assert (runtime / "tool-env.json").read_text() == '{"node":"old"}'
+    assert (runtime / "desktop-install.json").read_text() == "old receipt"
+    assert not (runtime / "activation.json").exists()
+
+
+def test_activate_hard_exit_is_recovered_before_a_retry(tmp_path):
+    import subprocess
+    import sys
+
+    module = bootstrap()
+    runtime, host, venv, staging, staging_host, staging_venv = _activation_fixture(tmp_path)
+    repo = Path(module.__file__).resolve().parents[1]
+    script = f"""
+import os, sys
+from pathlib import Path
+sys.path.insert(0, {str(repo)!r})
+import scripts.bootstrap as bootstrap
+real = Path.replace
+def replace(self, target):
+    if self == Path({str(staging_host)!r}) and Path(target) == Path({str(host)!r}):
+        os._exit(97)
+    return real(self, target)
+Path.replace = replace
+bootstrap._activate(Path({str(runtime)!r}), Path({str(host)!r}), Path({str(staging)!r}), Path({str(staging_host)!r}), Path({str(staging_venv)!r}), True)
+"""
+    completed = subprocess.run([sys.executable, "-c", script], capture_output=True)
+    assert completed.returncode == 97
+    assert not host.exists()
+    assert (runtime / "transactions").is_dir()
+    assert module._recover_activation(runtime) is True
+    assert (host / "data/memory.db").read_bytes() == b"old"
+    assert (venv / "bin/python").read_text() == "old python"
+    assert (runtime / "tool-env.json").read_text() == '{"node":"old"}'
+    assert not (runtime / "activation.json").exists()
+
+
+def test_activation_backup_is_retained_until_explicit_finalize(tmp_path):
+    module = bootstrap()
+    runtime, host, venv, staging, staging_host, staging_venv = _activation_fixture(tmp_path)
+    module._activate(runtime, host, staging, staging_host, staging_venv, True)
+    assert (host / "data/memory.db").read_bytes() == b"new"
+    assert (runtime / "venv/bin/python").read_text() == "new python"
+    assert (runtime / "activation.json").exists()
+    assert module._finalize_activation(runtime) is True
+    assert not (runtime / "activation.json").exists()
+    assert not (runtime / "transactions").exists()
+
+
+def test_rollback_activation_restores_previous_generation(tmp_path):
+    module = bootstrap()
+    runtime, host, venv, staging, staging_host, staging_venv = _activation_fixture(tmp_path)
+    module._activate(runtime, host, staging, staging_host, staging_venv, True)
+    assert module.rollback_activation(runtime) is True
+    assert (host / "data/memory.db").read_bytes() == b"old"
+    assert (venv / "bin/python").read_text() == "old python"
+    assert (runtime / "tool-env.json").read_text() == '{"node":"old"}'
+    assert not (runtime / "activation.json").exists()
+
+
+def test_installed_upgrade_records_bounded_upstream_observation(tmp_path, monkeypatch):
+    import scripts.bootstrap as bootstrap
+
+    source = tmp_path / "source"
+    runtime = tmp_path / "runtime"
+    (source / "scripts").mkdir(parents=True)
+    runtime.mkdir()
+    (source / "runtime-lock.json").write_text("{}", encoding="utf-8")
+    (source / "scripts/check_upstream_core.py").write_text(
+        "def observe(lock, timeout=10.0):\n"
+        "    assert timeout == 3.0\n"
+        "    return {'status':'newer','locked':'4.29.4','latestStable':'4.30.0','checkedAt':'now'}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("DSWHALE_DESKTOP", "1")
+    monkeypatch.delenv("DSWHALE_SKIP_UPSTREAM", raising=False)
+
+    observed = bootstrap._record_upstream_observation(source, runtime)
+
+    assert observed["status"] == "newer"
+    recorded = json.loads((runtime / "upstream-core-observation.json").read_text(encoding="utf-8"))
+    assert recorded["latestStable"] == "4.30.0"
+
+
+def test_activate_hard_exit_after_host_swap_is_recovered(tmp_path):
+    import subprocess
+    import sys
+
+    module = bootstrap()
+    runtime, host, venv, staging, staging_host, staging_venv = _activation_fixture(tmp_path)
+    repo = Path(module.__file__).resolve().parents[1]
+    script = f"""
+import os, sys
+from pathlib import Path
+sys.path.insert(0, {str(repo)!r})
+import scripts.bootstrap as bootstrap
+real = Path.replace
+def replace(self, target):
+    result = real(self, target)
+    if self == Path({str(staging_host)!r}) and Path(target) == Path({str(host)!r}):
+        os._exit(97)
+    return result
+Path.replace = replace
+bootstrap._activate(Path({str(runtime)!r}), Path({str(host)!r}), Path({str(staging)!r}), Path({str(staging_host)!r}), Path({str(staging_venv)!r}), True)
+"""
+    completed = subprocess.run([sys.executable, "-c", script], capture_output=True)
+    assert completed.returncode == 97
+    assert (host / "data/memory.db").read_bytes() == b"new"
+    assert module._recover_activation(runtime) is True
+    assert (host / "data/memory.db").read_bytes() == b"old"
+    assert (venv / "bin/python").read_text() == "old python"
+    assert not (runtime / "activation.json").exists()
+
+
+def test_finalize_crash_after_commit_keeps_new_generation(tmp_path):
+    """A crash while deleting the old generation must never roll back live data."""
+    import subprocess
+    import sys
+
+    module = bootstrap()
+    runtime, host, venv, staging, staging_host, staging_venv = _activation_fixture(tmp_path)
+    module._activate(runtime, host, staging, staging_host, staging_venv, True)
+    repo = Path(module.__file__).resolve().parents[1]
+    script = f"""
+import os, shutil, sys
+from pathlib import Path
+sys.path.insert(0, {str(repo)!r})
+import scripts.bootstrap as bootstrap
+real = shutil.rmtree
+def rmtree(path, *args, **kwargs):
+    path = Path(path)
+    if path.parent.name == 'transactions':
+        critical = path / 'previous' / 'host' / 'data' / 'memory.db'
+        critical.unlink()
+        os._exit(99)
+    return real(path, *args, **kwargs)
+shutil.rmtree = rmtree
+bootstrap._finalize_activation(Path({str(runtime)!r}))
+"""
+    completed = subprocess.run([sys.executable, "-B", "-c", script], capture_output=True)
+    assert completed.returncode == 99
+    journal = json.loads((runtime / "activation.json").read_text())
+    assert journal["phase"] == "committed"
+    assert module._recover_activation(runtime) is True
+    assert (host / "data/memory.db").read_bytes() == b"new"
+    assert (runtime / "venv/bin/python").read_text() == "new python"
+    assert (runtime / "tool-env.json").read_text() == '{"node":"new"}'
+    assert not (runtime / "activation.json").exists()
+    assert not (runtime / "transactions").exists()
+
+
+def test_prepare_commits_activation_before_returning(tmp_path, monkeypatch):
+    module, runtime, host, original_config, receipt, venv = _staging_prepare_fixture(
+        tmp_path, monkeypatch
+    )
+    monkeypatch.setattr(module, "_staged_verify", lambda *args, **kwargs: {})
+    monkeypatch.setattr(module, "_post_activation_verify", lambda *args, **kwargs: {})
+    monkeypatch.setattr(module, "_record_upstream_observation", lambda *args, **kwargs: None)
+    module.prepare(Path(module.__file__).resolve().parents[1], runtime)
+    assert (host / "data/memory.db").read_bytes() == b"keep-memory"
+    assert not (runtime / "activation.json").exists()
+    assert not (runtime / "transactions").exists()
+    # A later cold-start failure must have no retained generation to roll back.
+    assert module.rollback_activation(runtime) is False
+
+
+def test_settings_saved_after_install_survive_a_failed_cold_start(tmp_path, monkeypatch):
+    module, runtime, host, original_config, receipt, venv = _staging_prepare_fixture(
+        tmp_path, monkeypatch
+    )
+    monkeypatch.setattr(module, "_staged_verify", lambda *args, **kwargs: {})
+    monkeypatch.setattr(module, "_post_activation_verify", lambda *args, **kwargs: {})
+    monkeypatch.setattr(module, "_record_upstream_observation", lambda *args, **kwargs: None)
+    module.prepare(Path(module.__file__).resolve().parents[1], runtime)
+    assert module._read_journal(runtime) is None
+
+    from dswhale.desktop_settings import save_settings
+
+    saved = save_settings(host, {"replyStyleMode": "natural"})
+    settings_file = host / "data/config/astrbot_plugin_dswhale_config.json"
+    before = settings_file.read_bytes()
+    assert saved["replyStyleMode"] == "natural"
+    # A busy port or any ordinary cold-start failure is not an activation
+    # rollback; recovery must leave the user's write untouched.
+    assert module._recover_activation(runtime) is False
+    assert settings_file.read_bytes() == before
+    assert (host / "data/memory.db").read_bytes() == b"keep-memory"
+
+
+def _run_finalize_crash(tmp_path, patch):
+    module = bootstrap()
+    runtime, host, venv, staging, staging_host, staging_venv = _activation_fixture(tmp_path)
+    module._activate(runtime, host, staging, staging_host, staging_venv, True)
+    repo = Path(module.__file__).resolve().parents[1]
+    script = f"""
+import os, sys
+from pathlib import Path
+sys.path.insert(0, {str(repo)!r})
+import scripts.bootstrap as bootstrap
+{patch}
+bootstrap._finalize_activation(Path({str(runtime)!r}))
+"""
+    import subprocess
+    import sys
+
+    completed = subprocess.run([sys.executable, "-B", "-c", script], capture_output=True)
+    assert completed.returncode == 98
+    assert json.loads((runtime / "activation.json").read_text())["phase"] == "committed"
+    assert module._recover_activation(runtime) is True
+    assert (host / "data/memory.db").read_bytes() == b"new"
+    assert (runtime / "venv/bin/python").read_text() == "new python"
+    assert not (runtime / "activation.json").exists()
+    assert not (runtime / "transactions").exists()
+
+
+def test_finalize_crash_before_cleanup_keeps_new_generation(tmp_path):
+    _run_finalize_crash(tmp_path, "bootstrap._cleanup_transaction=lambda *a, **k: os._exit(98)")
+
+
+def test_finalize_crash_after_tree_removal_keeps_new_generation(tmp_path):
+    _run_finalize_crash(
+        tmp_path,
+        """
+real_unlink = Path.unlink
+def unlink(self, *args, **kwargs):
+    if self.name == 'activation.json':
+        os._exit(98)
+    return real_unlink(self, *args, **kwargs)
+Path.unlink = unlink
+""",
+    )

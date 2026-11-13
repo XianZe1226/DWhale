@@ -1,0 +1,6 @@
+{
+  "repository": "XianZe1226/DWhale",
+  "algorithm": "ed25519",
+  "publicKey": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAk2ka+uSEWaCyO5XCzQtRKVB/4TO2vMMzflqS+4Wg5ps=\n-----END PUBLIC KEY-----\n",
+  "legacyPublicKey": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEACU77a+cdop5SQIsWC114ZNkq3CNfNgrbaSk+rMNGtyE=\n-----END PUBLIC KEY-----\n"
+}

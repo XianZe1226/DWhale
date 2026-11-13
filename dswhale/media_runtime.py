@@ -1,0 +1,189 @@
+"""Checksum-pinned, private FFmpeg tools; never invoke a system package manager."""
+
+import hashlib
+import json
+import os
+import platform
+import re
+import shutil
+import stat
+import subprocess
+import tempfile
+import uuid
+import zipfile
+from pathlib import Path, PurePosixPath
+
+import httpx
+from filelock import FileLock
+
+from dswhale.network import download_verified, read_network_config
+
+DOWNLOAD_LIMIT = 300 * 1024**2
+UNPACKED_LIMIT = 1024**3
+MEDIA_VERSION = "9.0.2"
+
+
+def select_media_assets(system=None, machine=None):
+    system = system or platform.system()
+    machine = (machine or platform.machine()).lower()
+    arch = {"amd64": "x64", "x86_64": "x64", "arm64": "arm64", "aarch64": "arm64"}.get(machine)
+    os_name = {"Windows": "win", "Darwin": "darwin", "Linux": "linux"}.get(system)
+    assets = json.loads(Path(__file__).with_name("media_assets.json").read_text(encoding="utf-8"))
+    key = f"{os_name}-{arch}"
+    if key not in assets:
+        raise ValueError("专用 FFmpeg 支持 Windows x64、macOS Apple Silicon 和 Linux x64")
+    return assets[key]
+
+
+def usable_media(executable, tool):
+    try:
+        result = subprocess.run(
+            [str(executable), "-version"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=10,
+            check=True,
+        )
+        version = re.match(rf"^{tool} version (\d+)\.\d+(?:\.\d+)?(?:[-\s]|$)", result.stdout)
+        return bool(version and int(version[1]) >= 6)
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def download_asset(asset, destination, *, config=None):
+    download_verified(
+        asset, destination, config=config, stream=httpx.stream, max_bytes=DOWNLOAD_LIMIT
+    )
+
+
+def extract_media_archive(archive, destination, tool, sha256):
+    archive, destination = Path(archive), Path(destination)
+    if archive.stat().st_size > DOWNLOAD_LIMIT:
+        raise ValueError("媒体工具压缩包大小超过限制")
+    with archive.open("rb") as source:
+        if hashlib.file_digest(source, "sha256").hexdigest() != sha256:
+            raise ValueError("媒体工具压缩包校验失败")
+    with zipfile.ZipFile(archive) as bundle:
+        infos = bundle.infolist()
+        if len(infos) > 20000 or sum(info.file_size for info in infos) > UNPACKED_LIMIT:
+            raise ValueError("媒体工具解压大小超过限制")
+        wanted, seen = [], set()
+        for info in infos:
+            # ZipInfo normalizes Windows separators in filename. Validate the
+            # original archive member as well, before trusting the canonical one.
+            name, mode = info.orig_filename, info.external_attr >> 16
+            path = PurePosixPath(name)
+            if (
+                not path.parts
+                or path.is_absolute()
+                or ".." in path.parts
+                or "\\" in name
+                or "\x00" in name
+                or ":" in name
+                or stat.S_ISLNK(mode)
+                or any(
+                    p.rstrip(" .") != p
+                    or p.split(".")[0].upper()
+                    in {
+                        "CON",
+                        "PRN",
+                        "AUX",
+                        "NUL",
+                        *(f"COM{i}" for i in range(1, 10)),
+                        *(f"LPT{i}" for i in range(1, 10)),
+                    }
+                    for p in path.parts
+                )
+            ):
+                raise ValueError("媒体工具压缩包包含不安全路径")
+            normalized = name.rstrip("/").casefold()
+            if normalized in seen:
+                raise ValueError("媒体工具压缩包包含重复路径")
+            seen.add(normalized)
+            if not info.is_dir() and path.name in {tool, f"{tool}.exe"}:
+                wanted.append(info)
+        if len(wanted) != 1:
+            raise ValueError("媒体工具压缩包结构不正确")
+        with bundle.open(wanted[0]) as source, destination.open("xb") as output:
+            shutil.copyfileobj(source, output, length=1024 * 1024)
+        destination.chmod(0o755)
+        # Keep vendor notices without extracting vendor-controlled paths.
+        for number, info in enumerate(infos):
+            leaf = PurePosixPath(info.orig_filename).name.lower()
+            if (
+                not info.is_dir()
+                and leaf.startswith(("license", "copying", "notice"))
+                and info.file_size <= 2 * 1024**2
+            ):
+                licenses = destination.parent / "licenses"
+                licenses.mkdir(exist_ok=True)
+                (licenses / f"{tool}-vendor-{number}.txt").write_bytes(bundle.read(info))
+
+
+def _record_media_license(directory, assets, names):
+    licenses = directory / "licenses"
+    licenses.mkdir(exist_ok=True)
+    for tool, filename in names.items():
+        result = subprocess.run(
+            [str(directory / filename), "-L"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=10,
+            check=True,
+        )
+        (licenses / f"{tool}-license.txt").write_text(
+            result.stdout + result.stderr, encoding="utf-8"
+        )
+    (directory / "sources.json").write_text(json.dumps(assets, indent=2) + "\n", encoding="utf-8")
+
+
+def ensure_media(runtime, *, reuse=True):
+    runtime = Path(runtime).expanduser().resolve()
+    names = {tool: f"{tool}.exe" if os.name == "nt" else tool for tool in ("ffmpeg", "ffprobe")}
+    existing = {tool: shutil.which(tool) if reuse else None for tool in names}
+    if all(value and usable_media(value, tool) for tool, value in existing.items()):
+        return {tool: Path(value).resolve() for tool, value in existing.items()}
+    tools = runtime / "tools"
+    tools.mkdir(parents=True, exist_ok=True)
+    with FileLock(tools / "media-install.lock", timeout=0):
+        target = tools / f"ffmpeg-{MEDIA_VERSION}"
+        result = {tool: target / filename for tool, filename in names.items()}
+        if all(usable_media(value, tool) for tool, value in result.items()):
+            return result
+        assets = select_media_assets()
+        with tempfile.TemporaryDirectory(prefix="media-stage-", dir=tools) as directory:
+            stage = Path(directory)
+            binaries = stage / "bin"
+            binaries.mkdir()
+            downloaded = {}
+            for tool, filename in names.items():
+                asset = assets[tool]
+                key = (asset["url"], asset["sha256"])
+                if key not in downloaded:
+                    cache = runtime / "cache/downloads"
+                    cache.mkdir(parents=True, exist_ok=True)
+                    archive = cache / f"media-{asset['sha256']}.zip"
+                    download_asset(asset, archive, config=read_network_config(runtime))
+                    downloaded[key] = archive
+                extract_media_archive(downloaded[key], binaries / filename, tool, asset["sha256"])
+                if not usable_media(binaries / filename, tool):
+                    raise RuntimeError("下载的媒体工具与当前系统不兼容")
+            _record_media_license(binaries, assets, names)
+            if target.is_symlink():
+                raise ValueError("媒体工具目标不能是符号链接")
+            previous = tools / f".ffmpeg-previous-{uuid.uuid4().hex}"
+            if target.exists():
+                target.rename(previous)
+            try:
+                binaries.rename(target)
+            except BaseException:
+                if previous.exists():
+                    previous.rename(target)
+                raise
+            if previous.exists():
+                shutil.rmtree(previous)
+        return result

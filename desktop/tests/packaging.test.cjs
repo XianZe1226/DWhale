@@ -1,0 +1,118 @@
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const yaml = require('js-yaml');
+const os = require('node:os');
+const { spawnSync } = require('node:child_process');
+const { flipFuses } = require('@electron/fuses');
+require('app-builder-lib');
+const { PlatformPackager } = require('app-builder-lib/out/platformPackager');
+const { verifyBinary } = require('../../scripts/verify-electron-fuses.cjs');
+
+test('installer inventory excludes all personal QQ runtime components', () => {
+  const config = require('../../electron-builder.cjs');
+  assert.deepEqual(config.files.filter(file => /napcat|qq-native/i.test(file)), []);
+});
+
+test('every explicit installer source exists after feature removal', () => {
+  const config = require('../../electron-builder.cjs');
+  for (const file of config.files.filter(file => !/[*!]/.test(file))) {
+    assert.equal(fs.existsSync(path.resolve(__dirname, '../..', file)), true, file);
+  }
+});
+
+test('native CI upgrade profile uses an official identity without personal QQ fields', () => {
+  let fixture = {};
+  try { fixture = require('./fixtures/official-profile.cjs'); } catch {}
+  assert.equal(typeof fixture.officialProfile, 'function');
+  const profile = fixture.officialProfile();
+  assert.equal(profile.qq_connection_mode, 'official');
+  assert.equal(profile.qq_default_delivery, 'official');
+  assert.equal(profile.official_owner_umo, 'synthetic-official:FriendMessage:Synthetic_OpenID');
+  assert.equal(profile.proactive_enabled, true);
+  assert.equal(profile.bili_enabled, true);
+  assert.equal(profile.daily_limit, 0);
+  for (const field of ['owner_qq', 'owner_umo', 'qq_signature_enabled', 'qzone_enabled']) {
+    assert.equal(Object.hasOwn(profile, field), false);
+  }
+  assert.notEqual(fixture.officialProfile(), profile);
+});
+
+test('packaged app ships the shared connection and status modules', () => {
+  const config = require('../../electron-builder.cjs');
+  for (const file of ['desktop/lib/official-connection.cjs', 'desktop/lib/status-cache.cjs', 'desktop/lib/services.cjs', 'desktop/lib/security.cjs', 'desktop/lib/runtime-lock.cjs', 'desktop/lib/update-protocol.cjs', 'desktop/lib/update-chain.cjs', 'desktop/lib/appearance.cjs', 'desktop/lib/window-chrome.cjs', 'desktop/lib/branding.cjs', 'desktop/lib/mac-migration.cjs']) {
+    assert.ok(config.files.includes(file), file);
+  }
+  assert.ok(config.extraResources.some(item => item.from === 'desktop-resources/backend'));
+});
+
+test('builder startup policy disables inherited Node mode in a real copied Electron binary', async () => {
+  const electron = require('electron');
+  const source = process.platform === 'darwin'
+    ? path.resolve(electron, '../../Frameworks/Electron Framework.framework/Electron Framework') : electron;
+  const folder = fs.mkdtempSync(path.join(os.tmpdir(), 'dswhale-fuses-'));
+  try {
+    const binary = path.join(folder, 'electron-copy');
+    fs.copyFileSync(source, binary, fs.constants.COPYFILE_FICLONE);
+    await assert.rejects(verifyBinary(binary), /must be disabled/);
+    const config = require('../../electron-builder.cjs');
+    const fuses = await PlatformPackager.prototype.generateFuseConfig(config.electronFuses || {});
+    await flipFuses(binary, fuses);
+    assert.equal(await verifyBinary(binary), true);
+  } finally { fs.rmSync(folder, { recursive: true, force: true }); }
+});
+
+test('native installer workflow parses before it reaches GitHub Actions', () => {
+  const file = path.resolve(__dirname, '../../.github/workflows/desktop.yml');
+  const workflow = yaml.load(fs.readFileSync(file, 'utf8'));
+  assert.equal(workflow.name, 'Desktop installers');
+  assert.equal(workflow.jobs.build.strategy.matrix.include.length, 3);
+});
+
+test('an empty optional signing secret does not become a certificate path', () => {
+  const config = path.resolve(__dirname, '../../electron-builder.cjs');
+  const result = spawnSync(process.execPath, ['-e', `require(${JSON.stringify(config)}); if (process.env.CSC_LINK !== undefined) process.exit(1)`], {
+    env: { ...process.env, CSC_LINK: '', CSC_KEY_PASSWORD: '' }, encoding: 'utf8'
+  });
+  assert.equal(result.status, 0, result.stderr);
+});
+
+test('checksum step runs from a temporary Actions script outside the repository', () => {
+  const root = path.resolve(__dirname, '../..');
+  const workflow = yaml.load(fs.readFileSync(path.join(root, '.github/workflows/desktop.yml'), 'utf8'));
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'dswhale-workflow-'));
+  try {
+    fs.writeFileSync(path.join(directory, 'DSWhale-fixture.exe'), 'synthetic installer');
+    const step = workflow.jobs.build.steps.find(step => step.name === 'Create checksums for installers only');
+    const script = path.join(directory, 'action.py');
+    fs.writeFileSync(script, step.run.replace("Path('desktop-dist')", `Path(${JSON.stringify(directory)})`).replaceAll('${{ matrix.platform }}', 'fixture'));
+    const python = process.env.DSWHALE_BUILD_PYTHON || (process.platform === 'win32' ? 'python' : 'python3');
+    const result = spawnSync(python, [script], { cwd: root, encoding: 'utf8' });
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(fs.readFileSync(path.join(directory, 'SHA256SUMS-fixture.txt'), 'utf8'), /^[a-f0-9]{64}  DSWhale-fixture\.exe\r?\n$/);
+  } finally { fs.rmSync(directory, { recursive: true, force: true }); }
+});
+
+test('source artifact gate runs from the temporary Actions script location',()=>{
+  const root=path.resolve(__dirname,'../..');
+  const workflow=yaml.load(fs.readFileSync(path.join(root,'.github/workflows/ci.yml'),'utf8'));
+  const directory=fs.mkdtempSync(path.join(os.tmpdir(),'dswhale-source-gate-'));
+  try{
+    const step=workflow.jobs.test.steps.find(step=>step.name==='Verify wheel and source bridge inventory independently');
+    const setup=`import subprocess, zipfile, tarfile\nfrom pathlib import Path\nfolder=Path(${JSON.stringify(directory)})\nnames=subprocess.check_output(['git','ls-files','-z','--','dswhale/bili_bridge']).decode().split('\\0')\nwith zipfile.ZipFile(folder/'dswhale-0.0.0-py3-none-any.whl','w') as wheel, tarfile.open(folder/'dswhale-0.0.0.tar.gz','w:gz') as source:\n    for name in filter(None,names):\n        wheel.write(name,name)\n        source.add(name,arcname='dswhale-0.0.0/'+name)\n`;
+    const script=path.join(directory,'action.py');
+    const body=step.run.replaceAll("Path('dist')",`Path(${JSON.stringify(directory)})`);
+    assert.ok(!body.includes("Path('dist')"));
+    fs.writeFileSync(script,setup+body);
+    const python=process.env.DSWHALE_BUILD_PYTHON||(process.platform==='win32'?'python':'python3');
+    const result=spawnSync(python,[script],{cwd:root,encoding:'utf8'});
+    assert.equal(result.status,0,result.stderr);
+    const tracked=spawnSync('git',['ls-files','-z','--','dswhale/bili_bridge'],{cwd:root,encoding:'utf8'});
+    assert.equal(tracked.status,0,tracked.stderr);
+    const expected=tracked.stdout.split('\0').filter(Boolean).length;
+    assert.ok(expected>0);
+    const counts=[...result.stdout.matchAll(/(\d+) bridge source files verified/g)].map(match=>Number(match[1]));
+    assert.deepEqual(counts,[expected,expected]);
+  }finally{fs.rmSync(directory,{recursive:true,force:true});}
+});
