@@ -7,11 +7,13 @@ const fixture = path.join(__dirname, 'fixtures/console-layout.html');
 const stylesheet = path.join(__dirname, '../lib/console-layout.cjs');
 const cases = [
   { width: 980, sidebar: 245, stacked: true },
+  // Exercise the content space consumed by a 15px classic vertical scrollbar.
+  { width: 980, sidebar: 245, contentInset: 15, stacked: true },
   { width: 964, sidebar: 245, stacked: true },
   { width: 740, sidebar: 245, stacked: true },
   { width: 720, sidebar: 245, stacked: true },
-  { width: 1041, sidebar: 245, stacked: true },
-  { width: 1042, sidebar: 245, stacked: false },
+  { width: 1280, sidebar: 245, rowContentWidth: 560, stacked: true },
+  { width: 1280, sidebar: 245, rowContentWidth: 561, stacked: false },
   { width: 980, sidebar: 56, stacked: false },
   { width: 1280, sidebar: 245, stacked: false },
 ];
@@ -37,16 +39,33 @@ if (process.versions.electron) {
     const html = fs.readFileSync(fixture, 'utf8');
     const css = fs.existsSync(stylesheet) ? require(stylesheet) : '';
     const results = [];
-    for (const { width, sidebar } of cases) {
+    for (const { width, sidebar, contentInset = 0, rowContentWidth } of cases) {
       window.setContentSize(width, 700);
       await window.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`);
       await window.webContents.executeJavaScript(`
+        document.body.style.width = 'calc(100% - ${contentInset}px)';
         document.querySelector('.fixture').style.marginLeft = '${sidebar}px';
         document.querySelector('.fixture').style.width = 'calc(100% - ${sidebar + 6}px)';
       `);
+      if (rowContentWidth !== undefined) {
+        await window.webContents.executeJavaScript(`
+          const row = document.querySelector('#ordinary');
+          row.style.boxSizing = 'content-box';
+          row.style.width = '${rowContentWidth}px';
+          // The fixture reset inherits box-sizing. Retain the columns' original box model.
+          for (const column of row.children) column.style.boxSizing = 'border-box';
+        `);
+      }
       if (css) await window.webContents.insertCSS(css);
       results.push(await window.webContents.executeJavaScript(`
-        new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(() => {
+        (async () => {
+          await document.fonts.ready;
+          const contentWidth = element => {
+            const style = getComputedStyle(element);
+            return element.getBoundingClientRect().width
+              - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight)
+              - parseFloat(style.borderLeftWidth) - parseFloat(style.borderRightWidth);
+          };
           const main = document.querySelector('.config-workspace__main');
           const row = document.querySelector('#ordinary');
           const label = row.querySelector('.property-info').getBoundingClientRect();
@@ -57,11 +76,13 @@ if (process.versions.electron) {
           const hint = document.querySelector('#long-label .property-hint');
           const editor = document.querySelector('.fixture-editor');
           const textarea = document.querySelector('.fixture-textarea');
-          const unrelated = document.querySelector('#unrelated .property-info').getBoundingClientRect();
+          const unrelatedRow = document.querySelector('#unrelated .config-row');
+          const unrelated = unrelatedRow.querySelector('.property-info').getBoundingClientRect();
           const modalLabel = document.querySelector('#modal .property-info').getBoundingClientRect();
           const modalInput = document.querySelector('#modal .config-input').getBoundingClientRect();
-          resolve({
+          return {
             width: innerWidth, mainWidth: main.clientWidth, mainScrollWidth: main.scrollWidth,
+            rowContentWidth: contentWidth(row),
             stacked: input.top >= label.bottom - 1,
             inputWidth: input.width, controlWidth: control.width, editableWidth: editable.width,
             titleClipped: title.scrollWidth > title.clientWidth + 1,
@@ -70,9 +91,10 @@ if (process.versions.electron) {
             textareaScrollable: textarea.scrollWidth > textarea.clientWidth,
             editorWidth: editor.clientWidth,
             unrelatedWidth: unrelated.width,
+            unrelatedContentWidth: contentWidth(unrelatedRow),
             modalStacked: modalInput.top >= modalLabel.bottom - 1,
-          });
-        })))
+          };
+        })()
       `));
     }
     process.stdout.write(`CONSOLE_LAYOUT_RESULT ${JSON.stringify(results)}\n`);
@@ -128,6 +150,9 @@ if (process.versions.electron) {
       context.diagnostic(JSON.stringify(layouts));
       for (const [index, layout] of layouts.entries()) {
         const expected = cases[index];
+        if (expected.rowContentWidth !== undefined) {
+          assert.equal(layout.rowContentWidth, expected.rowContentWidth, 'the query boundary uses the explicitly set row content width');
+        }
         assert.equal(layout.stacked, expected.stacked, `field arrangement at viewport ${layout.width}px and sidebar ${expected.sidebar}px`);
         if (expected.stacked) {
           assert.equal(layout.titleClipped, false, `title clipped at ${layout.width}px`);
@@ -140,7 +165,7 @@ if (process.versions.electron) {
         assert.ok(layout.mainScrollWidth <= layout.mainWidth + 1, `form scrolls horizontally at ${layout.width}px`);
         assert.equal(layout.editorScrollable, true, 'the code field retains local horizontal scrolling');
         assert.equal(layout.textareaScrollable, true, 'the textarea retains local horizontal scrolling');
-        assert.equal(layout.unrelatedWidth, layout.width / 2, 'wide dialogs retain their original columns');
+        assert.equal(layout.unrelatedWidth, layout.unrelatedContentWidth / 2, 'wide dialogs retain their original columns within the available content width');
         assert.equal(layout.modalStacked, true, 'narrow dialog rows adapt to their own available width');
       }
     } finally {
