@@ -42,7 +42,19 @@ function harness({ platform = process.platform, backendRunning = true, qqRunning
   class LocalView {
     constructor() {
       views.push(this);
-      this.webContents = { setWindowOpenHandler() {}, on() {}, close() {}, isDestroyed: () => false, loadURL: async url => { loadedURLs.push(url); events.push('open-panel'); } };
+      this.listeners = new Map();
+      this.appliedCSS = [];
+      let currentURL = '';
+      let destroyed = false;
+      this.webContents = {
+        setWindowOpenHandler() {},
+        on: (name, callback) => this.listeners.set(name, callback),
+        close() { destroyed = true; },
+        isDestroyed: () => destroyed,
+        getURL: () => currentURL,
+        insertCSS: async css => { this.appliedCSS.push(css); return 'synthetic-style-key'; },
+        loadURL: async url => { currentURL = url; loadedURLs.push(url); events.push('open-panel'); this.listeners.get('dom-ready')?.(); },
+      };
     }
     setBounds(bounds) { this.bounds = { ...bounds }; }
   }
@@ -507,4 +519,35 @@ test('Windows main-process harness can stop without starting any service', async
   const state = await h.perform('stop');
   assert.equal(state.running, false);
   assert.deepEqual(h.events, ['stop-conversation']);
+});
+
+
+test('managed AstrBot views receive the narrow form adapter on load and reload', async () => {
+  const h = harness({ backendRunning: true, contentSize: [980, 700] });
+  for (const panel of ['astrbot', 'models', 'memory', 'persona', 'qq']) {
+    await h.perform('open-panel', { panel });
+    const view = h.views.at(-1);
+    assert.equal(view.appliedCSS.length, 1, panel + ' initial document');
+    assert.equal(view.appliedCSS[0], require('../lib/console-layout.cjs'));
+    view.listeners.get('dom-ready')();
+    assert.equal(view.appliedCSS.length, 2, panel + ' reloaded document');
+  }
+  const detached = h.views[0];
+  const previous = detached.appliedCSS.length;
+  detached.listeners.get('dom-ready')();
+  assert.equal(detached.appliedCSS.length, previous, 'detached console ignores late document events');
+});
+
+test('the Bilibili console keeps its own form layout', async () => {
+  const h = harness({ backendRunning: true });
+  h.manager.host = path.join(h.userData, 'synthetic-host');
+  h.supervisor.startedAt = Date.now();
+  const control = path.join(h.manager.host, 'data/plugin_data/astrbot_plugin_dswhale/bilibili/control.json');
+  fs.mkdirSync(path.dirname(control), { recursive: true });
+  fs.writeFileSync(control, JSON.stringify({ port: 49123, token: 'synthetic-bili-token' }));
+  await h.perform('open-panel', { panel: 'bilibili' });
+  const view = h.views.at(-1);
+  assert.equal(view.appliedCSS.length, 0);
+  view.listeners.get('dom-ready')?.();
+  assert.equal(view.appliedCSS.length, 0);
 });

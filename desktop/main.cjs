@@ -26,6 +26,7 @@ const { StatusCache } = require('./lib/status-cache.cjs');
 const { VisibilityMonitor } = require('./lib/visibility-monitor.cjs');
 const windowChrome = require('./lib/window-chrome.cjs');
 const { Appearance, AppearanceError } = require('./lib/appearance.cjs');
+const consoleLayout = require('./lib/console-layout.cjs');
 const branding = require('./lib/branding.cjs');
 const macMigration = require('./lib/mac-migration.cjs');
 class UserActionError extends Error {}
@@ -179,6 +180,11 @@ async function openPanel(panel) {
   });
   const restrict = (event, target) => { if (!permittedNavigation(target, url)) event.preventDefault(); };
   view.webContents.on('will-navigate', restrict); view.webContents.on('will-redirect', restrict);
+  if (panel !== 'bilibili') view.webContents.on('dom-ready', () => {
+    if (panelView !== view || generation !== panelGeneration || view.webContents.isDestroyed() || !permittedNavigation(view.webContents.getURL(), url)) return;
+    // Apply the scoped layout again after each real dashboard document load.
+    view.webContents.insertCSS(consoleLayout).catch(() => {});
+  });
   view.webContents.on('render-process-gone', () => { if (panelView === view && generation === panelGeneration) closePanel(); });
   window.contentView.addChildView(view); panelAttached = true; resizePanel();
   publish({ panel });

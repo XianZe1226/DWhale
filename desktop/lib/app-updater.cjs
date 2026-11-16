@@ -413,21 +413,29 @@ class AppUpdater {
       ||(Boolean(chain)&&chainOriginPresent&&['install-launched','completed','repair-required'].includes(chain.terminalState)&&[chain.fixedFinalTarget.version,chain.bridge.version].includes(this.currentVersion)&&this.state.phase!=='rolled-back')
     );
     const code=metadataError||rollbackError||this.state.errorCode;
+    // Manual replacement can leave a discovery for the running or an older
+    // version. Project its display phase without rewriting recovery records.
+    // Bridge downloads remain entry points for their fixed migration chain.
+    const phase=!code&&!this.transitionLock&&target
+      &&compareVersions(target.version,this.currentVersion)<=0
+      &&['available','downloaded'].includes(this.state.phase)?'up-to-date':this.state.phase;
     const interrupted=Boolean(code)||['downloading','snapshotting','install-ready','install-launched','rolling-back','rollback-launched'].includes(this.state.phase);
     const actions=['check',...(canDownload?['download']:[]),...(canInstall?['install']:[]),...(canRollback?['rollback']:[]),...(['awaiting-verification','awaiting-rollback-verification'].includes(this.state.phase)?['verify']:[]),...(this.state.phase==='repair-required'?['repair']:[])];
-    return {progress:this.progress?{...this.progress}:null,currentVersion:this.currentVersion,targetVersion:this.state.targetVersion||null,previousVersion:rollback?.previousVersion||this.state.previousVersion||null,channel:this.state.channel,phase:this.corrupt?'repair-required':this.state.phase,canDownload,canInstall,canRollback,actions,
+    return {progress:this.progress?{...this.progress}:null,currentVersion:this.currentVersion,targetVersion:this.state.targetVersion||null,previousVersion:rollback?.previousVersion||this.state.previousVersion||null,channel:this.state.channel,phase:this.corrupt?'repair-required':phase,canDownload,canInstall,canRollback,actions,
       impact:target?{...target.impact}:null,matrix:target?{...target.runtime}:{...this.matrix},minimumOS:{...MINIMUM_OS,linux:[...MINIMUM_OS.linux]},
       error:code?{code,message:MESSAGES[code]||MESSAGES.STORAGE_FAILED}:null,
       recovery:{interrupted,continueAction:canInstall?'install':canDownload?'download':null,requiresHealthVerification:['awaiting-verification','awaiting-rollback-verification','repair-required'].includes(this.state.phase),servicesMustRemainStopped:['snapshotting','install-ready','install-launched','awaiting-verification','rolling-back','rollback-launched','awaiting-rollback-verification','repair-required'].includes(this.state.phase),rollbackRequiresDataRestore:Boolean(rollbackTarget&&(rollbackTarget.impact.dataMigration||!rollbackTarget.impact.rollbackCompatible)),guidance:code?MESSAGES[code]:this.state.phase==='install-launched'?'请完成系统安装并重新打开应用；保留的旧版安装包和备份可用于回退。':this.state.phase==='rollback-launched'?'请完成旧版系统安装，重新打开应用后检查环境。':interrupted?'操作尚未完成，可继续下载或安装；备份保留在本机。':'更新仅在你明确操作时进行。'}};
   }
-  _automaticCheckAllowed() {
-    if(this.corrupt||this.state.errorCode||!['idle','up-to-date','available','installed','rolled-back'].includes(this.state.phase))return false;
-    if(this.state.phase!=='available'&&this.state.targetVersion&&compareVersions(this.state.targetVersion,this.currentVersion)>0)return false;
+  async _automaticCheckAllowed() {
+    // An externally applied download must leave future discovery enabled.
+    const {phase}=await this.status();
+    if(this.corrupt||this.state.errorCode||!['idle','up-to-date','available','installed','rolled-back'].includes(phase))return false;
+    if(phase!=='available'&&this.state.targetVersion&&compareVersions(this.state.targetVersion,this.currentVersion)>0)return false;
     try{this._platform();return true;}catch{return false;}
   }
   check({channel,automatic=false}={}) {
     return this._run('check',async()=>{
-      if(automatic&&!this._automaticCheckAllowed())return null;
+      if(automatic&&!(await this._automaticCheckAllowed()))return null;
       channel=channel===undefined?this.state.channel:channel;
       this._platform();if(!['alpha','stable'].includes(channel))fail('CHANNEL_INVALID');
       if(this.runtimeLock&&!this.runtimeLock.runtime)fail('RUNTIME_LOCK_INVALID');

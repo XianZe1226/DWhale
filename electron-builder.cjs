@@ -35,6 +35,7 @@ const config = {
     "desktop/lib/update-chain.cjs",
     "desktop/lib/appearance.cjs",
     "desktop/lib/window-chrome.cjs",
+    "desktop/lib/console-layout.cjs",
     "desktop/lib/branding.cjs",
     "desktop/lib/mac-migration.cjs",
     "desktop/lib/security.cjs",

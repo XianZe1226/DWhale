@@ -1,5 +1,7 @@
 'use strict';
+const { MATERIALS } = require('./appearance.cjs');
 const ACTIONS = new Set(['inspect', 'install', 'start', 'stop', 'open-panel', 'home', 'settings-get', 'settings-save', 'open-data', 'backup', 'restore', 'initial-login', 'extensions-status', 'extension-check', 'extension-update', 'extension-rollback', 'connections-status',   'settings-history', 'settings-restore-field', 'reply-style-preview']);
+for (const action of ['appearance-get', 'appearance-save']) ACTIONS.add(action);
 const PANELS = new Set(['astrbot', 'models', 'memory', 'bilibili', 'qq',  'persona']);
 const WORKSPACE_ACTIONS = new Set(['workspace-status','health-check','backup-list','backup-restore','backup-delete','diagnostics-export','app-update-check','app-update-start','app-update-download','app-update-install','app-update-rollback','preferences-save']);
 for (const action of WORKSPACE_ACTIONS) ACTIONS.add(action);
@@ -24,6 +26,8 @@ function validateSettings(payload) {
 
 function validateRequest(event, shell, action, payload) {
   if (!shell || event.sender !== shell || event.senderFrame !== shell.mainFrame || !ACTIONS.has(action)) throw new Error('不允许此操作');
+  if (action === 'appearance-get' && payload != null) throw new Error('此操作不接受额外参数');
+  if (action === 'appearance-save' && (!payload || typeof payload !== 'object' || Array.isArray(payload) || Object.keys(payload).join(',') !== 'material' || !MATERIALS.has(payload.material))) throw new Error('外观设置无效');
   if (action === 'open-panel' && (!payload || !PANELS.has(payload.panel))) throw new Error('页面无效');
   if (action === 'settings-save' && !validateSettings(payload)) throw new Error('设置无效');
   if (action === 'settings-history' && payload != null) throw new Error('此操作不接受额外参数');

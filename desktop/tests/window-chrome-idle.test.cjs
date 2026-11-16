@@ -10,7 +10,7 @@ const { createRequire } = require('node:module');
 const chrome = require('../lib/window-chrome.cjs');
 const { AppearanceError } = require('../lib/appearance.cjs');
 
-function mainHarness({ openWindow = false, dark = true } = {}) {
+function mainHarness({ openWindow = false, dark = true, userData } = {}) {
   const file = path.resolve(__dirname, '../main.cjs');
   const native = createRequire(file);
   const messages = [];
@@ -19,6 +19,8 @@ function mainHarness({ openWindow = false, dark = true } = {}) {
   const clock = fakeClock();
   const powerMonitor = new (require('node:events').EventEmitter)();
   const handlers = {};
+  const ipcHandlers = new Map();
+  const ipcRenderer = new (require('node:events').EventEmitter)();
   const nativeWindow = {
     visible: true, minimized: false,
     isDestroyed: () => false,
@@ -27,12 +29,12 @@ function mainHarness({ openWindow = false, dark = true } = {}) {
     on(name, callback) { handlers[name] = callback; },
     setMenuBarVisibility() {},
     loadURL: async () => {},
-    webContents: { send: (channel, value) => messages.push({ channel, state: structuredClone(value) }), setWindowOpenHandler() {}, on() {} },
+    webContents: { mainFrame: {}, send(channel, value) { const state = structuredClone(value); messages.push({ channel, state }); ipcRenderer.emit(channel, {}, state); }, setWindowOpenHandler() {}, on() {} },
   };
   const electron = {
-    app: { setName() {}, setAppUserModelId() {}, setPath() {}, getPath: name => path.join(require('node:os').tmpdir(), 'dwhale-synthetic-window', name), getVersion: () => '0.4.0-alpha.2', requestSingleInstanceLock: () => false, quit() {} },
+    app: { setName() {}, setAppUserModelId() {}, setPath() {}, getPath: name => userData ? name === 'userData' ? userData : path.join(userData, name) : path.join(require('node:os').tmpdir(), 'dwhale-synthetic-window', name), getVersion: () => '0.4.0-alpha.2', requestSingleInstanceLock: () => false, quit() {} },
     protocol: { registerSchemesAsPrivileged() {} },
-    powerMonitor, ipcMain: { handle() {} },
+    powerMonitor, ipcMain: { handle(channel, callback) { ipcHandlers.set(channel, callback); } },
     nativeTheme: { shouldUseDarkColors: dark },
     session: {
       fromPartition: () => ({ setProxy() {}, fetch() { throw Error('unexpected request'); }, setPermissionRequestHandler() {}, setPermissionCheckHandler() {} }),
@@ -72,7 +74,22 @@ function mainHarness({ openWindow = false, dark = true } = {}) {
       disposeMonitoring() { externalConnectionMonitor?.stop(); updateScheduler?.stop(); },
     };`, context);
   context.hooks.setWindow(nativeWindow);
-  return { ...context.hooks, nativeWindow, messages, handlers, clock, powerMonitor, healthReads: () => healthReads, options: () => capturedOptions };
+  const request = async (action, payload, event = { sender: nativeWindow.webContents, senderFrame: nativeWindow.webContents.mainFrame }) => {
+    const result = await ipcHandlers.get('dswhale:action')(event, action, structuredClone(payload));
+    return structuredClone(result);
+  };
+  ipcRenderer.invoke = (channel, action, payload) => {
+    assert.equal(channel, 'dswhale:action');
+    return request(action, payload);
+  };
+  let bridge;
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../preload.cjs'), 'utf8'), {
+    require(id) {
+      assert.equal(id, 'electron');
+      return { contextBridge: { exposeInMainWorld(name, value) { assert.equal(name, 'dswhale'); bridge = value; } }, ipcRenderer };
+    },
+  });
+  return { ...context.hooks, bridge, request, nativeWindow, messages, handlers, clock, powerMonitor, healthReads: () => healthReads, options: () => capturedOptions };
 }
 
 test('transparent native Windows controls use theme glyphs and reserve their content area', () => {
@@ -340,4 +357,93 @@ test('failed reads recover and a stopped monitor never publishes a late result',
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(h.results.length, 0);
   assert.equal(h.clock.timers.size, 0);
+});
+
+
+// A missing permission entry must fail these tests at the real IPC boundary.
+// The window and transport are synthetic; validator, handler, store and model are real.
+function appearanceSession(t, userData) {
+  const directory = userData || fs.mkdtempSync(path.join(fs.realpathSync(require('node:os').tmpdir()), 'dwhale-ipc-appearance-'));
+  if (!userData) t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const h = mainHarness({ openWindow: true, userData: directory });
+  t.after(() => h.disposeMonitoring());
+  return { h, directory, file: path.join(directory, 'desktop-appearance.json') };
+}
+
+test('real preload and registered IPC persist appearance and restore it in a fresh window', async t => {
+  const { h, directory, file } = appearanceSession(t);
+  const data = path.join(directory, 'runtime/host/data');
+  fs.mkdirSync(data, { recursive: true });
+  for (const name of ['provider.json', 'persona.json', 'memory.json']) fs.writeFileSync(path.join(data, name), 'synthetic original');
+  await h.createWindow();
+  const controller = require('../ui/model.js').createController({ bridge: h.bridge });
+  t.after(() => controller.dispose());
+  await controller.init();
+  await controller.act('appearance-save', { material: 'liquid' });
+  assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')), { format: 1, material: 'liquid', revision: 1 });
+  assert.equal(controller.get().appearance.material, 'liquid');
+  assert.equal(controller.get().appearanceError, '');
+  assert.deepEqual(await h.bridge.invoke('appearance-get'), { format: 1, material: 'liquid', revision: 1 });
+  for (const name of ['provider.json', 'persona.json', 'memory.json']) assert.equal(fs.readFileSync(path.join(data, name), 'utf8'), 'synthetic original');
+  controller.dispose();
+  h.disposeMonitoring();
+  const fresh = appearanceSession(t, directory).h;
+  await fresh.createWindow();
+  const next = require('../ui/model.js').createController({ bridge: fresh.bridge });
+  t.after(() => next.dispose());
+  await next.init();
+  assert.equal(next.get().appearance.material, 'liquid');
+  assert.equal(next.get().state.appearance.revision, 1);
+});
+
+test('rapid renderer appearance saves pass the IPC guard during an unrelated main action', async t => {
+  const { h, file } = appearanceSession(t);
+  await h.createWindow();
+  const controller = require('../ui/model.js').createController({ bridge: h.bridge });
+  t.after(() => controller.dispose());
+  await controller.init();
+  h.setBusy(true);
+  t.after(() => h.setBusy(false));
+  const choices = ['liquid', 'frosted', 'liquid', 'frosted', 'liquid'];
+  await Promise.all(choices.map(material => controller.act('appearance-save', { material })));
+  const saved = JSON.parse(fs.readFileSync(file, 'utf8'));
+  assert.equal(saved.material, 'liquid');
+  assert.equal(saved.revision, choices.length);
+  assert.equal(controller.get().appearance.material, 'liquid');
+  assert.equal(controller.get().appearancePending, false);
+});
+
+test('appearance IPC rejects invalid payloads and foreign frames without writing files', async t => {
+  const { h, file } = appearanceSession(t);
+  await h.createWindow();
+  for (const payload of [null, undefined, [], 'liquid', { material: 'unknown' }, { material: 'liquid', path: 'other.json' }, { material: 'liquid', revision: 12 }]) {
+    await assert.rejects(h.bridge.invoke('appearance-save', payload));
+  }
+  for (const payload of [{}, { extra: true }, false]) await assert.rejects(h.bridge.invoke('appearance-get', payload));
+  const shell = h.nativeWindow.webContents;
+  for (const event of [{ sender: {}, senderFrame: shell.mainFrame }, { sender: shell, senderFrame: {} }]) {
+    await assert.rejects(h.request('appearance-save', { material: 'liquid' }, event), /不允许此操作/);
+    await assert.rejects(h.request('appearance-get', undefined, event), /不允许此操作/);
+  }
+  assert.equal(fs.existsSync(file), false);
+  await h.bridge.invoke('appearance-save', { material: 'liquid' });
+  assert.equal(JSON.parse(fs.readFileSync(file, 'utf8')).material, 'liquid');
+});
+
+test('an actual persistence failure clears locally after a successful IPC save', async t => {
+  const { h, file } = appearanceSession(t);
+  await h.createWindow();
+  const controller = require('../ui/model.js').createController({ bridge: h.bridge });
+  t.after(() => controller.dispose());
+  await controller.init();
+  fs.mkdirSync(file);
+  await assert.rejects(controller.act('appearance-save', { material: 'liquid' }));
+  assert.ok(controller.get().appearanceError);
+  assert.equal(controller.get().appearance.material, 'frosted');
+  assert.equal(controller.get().error, '');
+  fs.rmdirSync(file);
+  await controller.act('appearance-save', { material: 'liquid' });
+  assert.equal(controller.get().appearance.material, 'liquid');
+  assert.equal(controller.get().appearanceError, '');
+  assert.equal(JSON.parse(fs.readFileSync(file, 'utf8')).material, 'liquid');
 });
