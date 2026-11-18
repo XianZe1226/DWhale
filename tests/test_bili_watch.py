@@ -507,7 +507,7 @@ def test_status_reports_the_installed_version(watching):
     from dswhale import __version__
 
     c, _ = watching
-    assert f"DSWhale {__version__}" in c.status(event(c.context))
+    assert f"DWhale {__version__}" in c.status(event(c.context))
 
 
 def test_new_artifact_is_seen_despite_coarse_or_delayed_filesystem_clock(tmp_path):

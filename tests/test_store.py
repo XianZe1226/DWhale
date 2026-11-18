@@ -146,3 +146,14 @@ def test_bili_share_uses_same_quiet_daily_and_unanswered_budget(tmp_path):
     store.transition(activity.id, "failed", noon.timestamp())
     assert scheduler.reserve(noon, external_kind="bili-share") is None
     store.close()
+
+
+def test_proactive_status_explains_schedule_and_respects_pause(tmp_path):
+    with Store(tmp_path / "status.db") as store:
+        scheduler = Scheduler(settings(), store)
+        assert scheduler.status(NOW, SCOPE, online=False) == "等待 QQ 官方连接恢复"
+        assert scheduler.reserve(NOW) is None
+        assert "12:00" in scheduler.status(NOW, SCOPE, online=True)
+        store.set_paused(SCOPE, True)
+        assert "/fish start" in scheduler.status(NOW, SCOPE, online=True)
+        assert scheduler.reserve(NOW + timedelta(hours=3)) is None

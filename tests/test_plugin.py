@@ -740,3 +740,31 @@ async def test_offline_default_platform_still_expires_old_claims(companion):
     assert c.store.has_pending([scope]) is False
     assert c.store.state(scope)["unanswered"] == 0
     assert c.context.queue.empty()
+
+
+async def test_internal_observer_accepts_only_queued_identity_and_stops_offline(companion):
+    import main
+
+    main.OwnerOnly.settings = companion.settings
+    gate = main.OwnerOnly(False)
+    later = NOW + timedelta(hours=2)
+    await companion.tick(NOW)
+    await companion.tick(later)
+    queued = await companion.context.queue.get()
+    assert gate.filter(queued, {})
+    forged = companion.context.event(queued.message_obj)
+    forged.set_extra("dswhale_activity_id", companion.internal_id(queued))
+    forged._dswhale_official_owner_event = companion
+    assert not gate.filter(forged, {})
+    companion.context.client._active_websockets = []
+    assert not companion.allow_delivery(queued, later)
+    assert companion.store.activity(companion.internal_id(queued)).status == "failed"
+
+
+def test_fish_status_command_does_not_postpone_next_chat(companion):
+    human = event(companion.context)
+    companion.observe(human, NOW)
+    scheduled = companion.store.state(SCOPE)
+    human.message_str = "fish status"
+    companion.observe(human, NOW + timedelta(minutes=15))
+    assert companion.store.state(SCOPE) == scheduled

@@ -12,6 +12,7 @@ if __package__:
     from .dswhale.config import Settings
     from .dswhale.persona import untrusted_block
     from .dswhale.persona_time_compat import install as install_persona_time_compat
+    from .dswhale.qq_gateway import install as install_qq_gateway
     from .dswhale.qq_identity import is_official_c2c, remember_c2c_scope
     from .dswhale.reply_cleanup import clean_content, clean_history, clean_stream, clean_text
     from .dswhale.store import Store
@@ -21,6 +22,7 @@ else:  # local SDK smoke tests
     from dswhale.config import Settings
     from dswhale.persona import untrusted_block
     from dswhale.persona_time_compat import install as install_persona_time_compat
+    from dswhale.qq_gateway import install as install_qq_gateway
     from dswhale.qq_identity import is_official_c2c, remember_c2c_scope
     from dswhale.reply_cleanup import clean_content, clean_history, clean_stream, clean_text
     from dswhale.store import Store
@@ -30,6 +32,9 @@ class OwnerOnly(filter.CustomFilter):
     settings = Settings()
 
     def filter(self, event: AstrMessageEvent, cfg: AstrBotConfig) -> bool:
+        internal = getattr(event, "_dswhale_official_owner_event", None)
+        if isinstance(internal, Companion) and internal.internal_id(event):
+            return internal.authorized(event)
         channel = event.get_platform_name()
         # Official C2C ownership requires provenance: a channel DM or a forged
         # platform event must never inherit the bound OpenID.
@@ -58,6 +63,7 @@ class DSWhale(Star):
         # an offset, which the dashboard renders as local time. Keep the data and
         # the AstrBot dependency untouched; only add the explicit offset.
         install_persona_time_compat()
+        install_qq_gateway()
 
     async def initialize(self):
         self.companion.start()

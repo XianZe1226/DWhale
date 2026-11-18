@@ -67,7 +67,7 @@ AppSecret 只保存在本机控制台。官方 OpenID 用于识别私聊用户�
 4. [绑定用户](docs/setup.md#绑定用户)：用 `/fish whoami` 获取官方用户标识和完整会话 ID，填写插件配置。
 5. [开启 B站功能](docs/bilibili.md)：登录 B站账号，设置偏好、活动时间和推荐渠道。
 
-主动聊天默认关闭。B站私信监听、自动私信和公开互动分别配置，详见 [B站设置](docs/bilibili.md)。
+在「QQ 连接」开启「主动找你聊」并保存。使用 `/fish status` 查看下次预计开场时间。B站私信监听、自动私信和公开互动分别配置，详见 [B站设置](docs/bilibili.md)。
 
 LivingMemory 和表情包插件可在「模型与记忆」中手动检查、更新，详见 [插件管理](docs/extensions.md)。
 

@@ -28,6 +28,10 @@ def owner_connected(companion, binding=None):
     platform = owner_platform(companion, binding)
     client = platform.get_client()
     for socket in getattr(client, "_active_websockets", ()):
+        if hasattr(socket, "authenticated"):
+            if socket.connected:
+                return True
+            continue
         connection = getattr(socket, "_conn", None)
         session = getattr(socket, "_session", {})
         if (

@@ -142,7 +142,10 @@
         if(state.setup?.modelConfigured===false)return view('model','配置聊天模型','官方接口已连接，接下来选择聊天模型。','QQ 已连接','good','route-intelligence','配置模型');
         return view('ready','QQ 官方机器人已连接','已确认官方网关连接。请用自己的 QQ 给机器人发一条消息，检查模型回复。','QQ 已连接','good');
       }
-      return {...view('official-connecting','正在连接 QQ 官方接口','配置保存后仍需等待连接。若长时间未连通，可检查机器人启用状态、凭据及平台要求的出口 IP。','等待连接','working','open-panel','检查官方配置'),panel:'qq'};
+      if(officialHealth ? officialHealth.gatewayBlocked === true : officialEntry?.health==='blocked'){
+        return {...view('official-blocked','QQ 官方连接需要处理','请在 QQ 开放平台检查机器人启用状态、凭据和网络设置。确认后在机器人配置页重新启用。','待检查','warn','open-panel','检查官方配置'),panel:'qq'};
+      }
+      return {...view('official-connecting','正在连接 QQ 官方接口','服务运行期间会自动尝试连接。若长时间未连通，请检查机器人状态、凭据及平台要求的出口 IP。','等待连接','working','open-panel','检查官方配置'),panel:'qq'};
   }
   function connectionSummary(data) { return { ...connectionViewModel(data), globalChannel: 'official' }; }
   function normalizeError(error) {
@@ -231,7 +234,7 @@
       data.state = { ...data.state, ...state, platform: { ...data.state.platform, ...state.platform }, setup: { ...data.state.setup, ...state.setup } };
     }
     if (!available && preview) {
-      merge({ version: '0.4.0a4', platform: { id: 'darwin-arm64', label: 'macOS · Apple Silicon', supported: true }, components: [
+      merge({ version: '0.4.0a5', platform: { id: 'darwin-arm64', label: 'macOS · Apple Silicon', supported: true }, components: [
         { id: 'python', label: 'Python', version: '3.12', status: 'missing', detail: '将安装到独立环境' },
         { id: 'node', label: 'Node.js', version: '22 LTS', status: 'missing', detail: '用于扩展与网页能力' },
         { id: 'ffmpeg', label: 'FFmpeg', version: '6+', status: 'missing', detail: '音频与视频处理' },

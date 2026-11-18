@@ -21,8 +21,8 @@ class Settings:
     timezone: str = "Asia/Shanghai"
     quiet_start: str = "23:00"
     quiet_end: str = "08:00"
-    min_interval_minutes: int = 120
-    max_interval_minutes: int = 240
+    min_interval_minutes: int = 30
+    max_interval_minutes: int = 75
     daily_limit: int = 3
     unanswered_limit: int = 2
     content_url: str = "http://127.0.0.1:8420"

@@ -56,13 +56,13 @@
   "min_interval_minutes": {
     "description": "主动活动最短间隔（分钟）",
     "type": "int",
-    "default": 120,
+    "default": 30,
     "hint": "保存后重载插件生效。"
   },
   "max_interval_minutes": {
     "description": "主动活动最长间隔（分钟）",
     "type": "int",
-    "default": 240,
+    "default": 75,
     "hint": "保存后重载插件生效。"
   },
   "daily_limit": {

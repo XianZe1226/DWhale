@@ -42,6 +42,31 @@ class Scheduler:
                 (now.timestamp(), due, scope),
             )
 
+    def status(self, now: datetime, scope: str, *, online: bool) -> str:
+        if not self.settings.proactive_enabled:
+            return "未开启，可在 QQ 连接页开启「主动找你聊」"
+        state = self.store.state(scope)
+        if state["paused"]:
+            return "已暂停，发送 /fish start 恢复"
+        if not online:
+            return "等待 QQ 官方连接恢复"
+        if self.settings.is_quiet(now):
+            return f"安静时段，{self.settings.quiet_end} 后再考虑开场"
+        if state["unanswered"] >= self.settings.unanswered_limit:
+            return "等你先聊一句"
+        local_day = self.settings.local_time(now).date().isoformat()
+        if self.store.count_local_day((scope,), local_day) >= self.settings.daily_limit:
+            return "今天的主动活动次数已用完"
+        if self.store.has_pending((scope,)):
+            return "正在准备一条消息"
+        due = state["next_due"]
+        if due is None:
+            return "正在安排下次开场"
+        if due <= now.timestamp():
+            return "已到开场时间，等待下一次检查"
+        next_chat = self.settings.local_time(datetime.fromtimestamp(due, tz=now.tzinfo))
+        return f"预计 {next_chat:%m-%d %H:%M} 后找你聊"
+
     def reserve(
         self,
         now: datetime,

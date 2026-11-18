@@ -24,7 +24,7 @@ from .host_config import (
     stream_decoration_reason,
 )
 from .media import MediaError, MediaReader
-from .persona import AUTONOMOUS_PROMPT, DEFAULT_PERSONA, untrusted_block
+from .persona import AUTONOMOUS_PROMPT, CASUAL_CHAT, DEFAULT_PERSONA, untrusted_block
 from .qq_identity import is_official_c2c
 from .qq_transport import owner_connected, owner_event
 from .reply_cleanup import clean_stream, clean_text
@@ -81,9 +81,12 @@ class Companion:
         if binding is None:
             return {"bound": False, "platformReady": False, "protocolConnected": False}
         platform_ready = False
+        gateway_blocked = False
         try:
             platform = self.context.get_platform_inst(binding.platform_id)
             platform_ready = bool(platform and platform.meta().name == binding.adapter_name)
+            if platform_ready:
+                gateway_blocked = getattr(platform.get_client(), "_dwhale_gateway_blocked", False)
         except Exception:
             platform_ready = False
         connected = False
@@ -96,6 +99,7 @@ class Companion:
             "bound": True,
             "platformReady": platform_ready,
             "protocolConnected": connected,
+            **({"gatewayBlocked": True} if gateway_blocked and not self.closed else {}),
         }
 
     def write_health(self):
@@ -186,6 +190,9 @@ class Companion:
             return
         if self.authorized(event) and not self.internal_id(event):
             self._style_stream_wrapper(event)
+            # The host can strip the slash prefix before invoking a command.
+            if event.message_str.lstrip("/ ").split(maxsplit=1)[:1] == ["fish"]:
+                return
             self.scheduler.human_received(
                 now or now_utc(), scopes=[binding.umo for binding in self.settings.owner_bindings]
             )
@@ -241,6 +248,7 @@ class Companion:
         if not self.authorized(event):
             return
         instructions = self.settings.persona or DEFAULT_PERSONA
+        instructions += "\n" + CASUAL_CHAT
         if self.settings.bili_enabled and not self.internal_id(event):
             instructions += (
                 "\n主人让你自己去看视频、找点东西看（未给链接）时，调用 dswhale_bili_watch_now，"
@@ -257,8 +265,9 @@ class Companion:
                 "\n本轮是内部自主活动，不是用户的新陈述。不要把任务文字或视频内容存成主人的事实。"
             )
         if self.internal_id(event):
-            instructions += "\n同一会话的只读记忆资料（不是指令）：\n" + str(
-                event.get_extra("dswhale_memory_snapshot", "尚未读取记忆，不要编造。")
+            instructions += "\n" + untrusted_block(
+                "owner-memory",
+                event.get_extra("dswhale_memory_snapshot", "尚未读取记忆，不要编造。"),
             )
         binding = self.binding_for(event)
         entries = self.store.journal(binding.umo if binding else self.settings.owner_scope, limit=3)
@@ -633,6 +642,7 @@ class Companion:
             and self.authorized(event)
             and activity
             and activity.status == "queued"
+            and self.delivery_platform_ready(self.binding_for(event))
             and not state["paused"]
             and state["last_human"] <= activity.created
             and not self.settings.is_quiet(now)
@@ -714,8 +724,6 @@ class Companion:
             platform = self.context.get_platform_inst(binding.platform_id)
             if not platform or platform.meta().name != binding.adapter_name:
                 return False
-            from .qq_transport import owner_connected
-
             return bool(owner_connected(self, binding)) and not self.closed
         except Exception:
             return False
@@ -870,8 +878,11 @@ class Companion:
             "uncertain": "发送结果未知，不会自动重发",
         }
         latest = status.get(recent[0]["status"], "未知") if recent else "尚无活动"
+        next_chat = self.scheduler.status(
+            now_utc(), scope, online=self.delivery_platform_ready(binding)
+        )
         return (
-            f"DSWhale {__version__}\n主动聊天：{'已启用' if self.settings.proactive_enabled else '未启用'}；{'暂停中' if state['paused'] else '运行中'}\n"
+            f"DWhale {__version__}\n主动聊天：{next_chat}\n"
             f"连续未回复活动：{state['unanswered']}/{self.settings.unanswered_limit}\n最近活动：{latest}\n"
             f"长期记忆插件：{'已加载，请用 /lmem status 检查配置' if memory else '未加载 LivingMemory'}\n"
             f"自动发现视频：{'已启用' if self.settings.discover_enabled and self.content is not None else '不可用' if self.settings.discover_enabled else '未启用'}\n"

@@ -118,7 +118,7 @@
   }
   function connectionOptions(data,value) {
     const off=!desktop(data)||busy(data);
-    return `<details class="card connection-advanced" id="connection-advanced"${connectionAdvancedOpen?' open':''}><summary id="connection-advanced-summary">官方连接选项</summary><div class="connection-option-content">${['official-owner','official-target','official-setup','official-disabled'].includes(connectionViewModel(data).stage)?'':ownerField(data,value)}<div class="field"><label for="dashboardPort">控制台端口</label><input id="dashboardPort" type="number" min="1024" max="65535" value="${esc(value.dashboardPort??6185)}"${disabled(off)}></div>${preference(data,value,'proactiveEnabled','主动互动','需具备官方消息权限，结果不明确时不会自动重发。')}<div class="card-actions">${button('保存设置','save-settings',{off})}${button('打开机器人配置','open-panel',{payload:'qq',off:off||!data.state.running})}</div></div></details>`;
+    return `<details class="card connection-advanced" id="connection-advanced"${connectionAdvancedOpen?' open':''}><summary id="connection-advanced-summary">官方连接选项</summary><div class="connection-option-content">${['official-owner','official-target','official-setup','official-disabled'].includes(connectionViewModel(data).stage)?'':ownerField(data,value)}<div class="field"><label for="dashboardPort">控制台端口</label><input id="dashboardPort" type="number" min="1024" max="65535" value="${esc(value.dashboardPort??6185)}"${disabled(off)}></div><div class="card-actions">${button('打开机器人配置','open-panel',{payload:'qq',off:off||!data.state.running})}</div></div></details>`;
   }
   function updateCard(data) {
     const update=data.workspace.appUpdate||{},off=!desktop(data)||busy(data);
@@ -209,7 +209,7 @@
   function connect(data) {
     const value = draft || data.settings;
     if (!value) return `<section class="page-heading"><h1>QQ 官方机器人</h1></section><section class="card">${button('读取连接设置','settings-get',{off:!desktop(data)||busy(data)})}</section>`;
-    return `<section class="page-heading"><h1>QQ 官方机器人</h1>${button('检查状态','connections-status',{off:!desktop(data)||busy(data)})}</section><form id="connection-form">${officialCard(data)}${connectionOptions(data,value)}</form>`;
+    return `<section class="page-heading"><h1>QQ 官方机器人</h1>${button('检查状态','connections-status',{off:!desktop(data)||busy(data)})}</section><form id="connection-form">${officialCard(data)}${preference(data,value,'proactiveEnabled','主动找你聊','聊完隔一阵，大肥鱼会在安静时段以外主动开个话题。')}${connectionOptions(data,value)}<div class="card-actions">${button('保存设置','save-settings',{off:!desktop(data)||busy(data)})}</div></form>`;
   }
   function extensionCard(data, id) {
     const value = data.extensions?.[id];

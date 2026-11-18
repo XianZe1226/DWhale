@@ -75,11 +75,13 @@ function platformTarget(platforms, type, boundId) {
 }
 async function officialHealthStatus(configured = false) {
   let protocolConnected = false;
+  let gatewayBlocked = false;
   try {
     const health = await readConnectionHealth({ host: manager.host, running: supervisor.running, startedAt: supervisor.startedAt || 0 });
-    protocolConnected = health.channels.official.state === 'connected' || health.channels.official.protocolConnected === true;
+    protocolConnected = health.channels.official.state === 'connected';
+    gatewayBlocked = health.channels.official.state === 'blocked';
   } catch {}
-  return { configured, protocolConnected };
+  return { configured, protocolConnected, ...(gatewayBlocked ? { gatewayBlocked } : {}) };
 }
 function publishOfficialStatus(patch, completeStartup = false) {
   const startup = { stage: supervisor?.running ? patch?.protocolConnected ? 'ready' : 'official-connecting' : 'stopped' };

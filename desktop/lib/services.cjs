@@ -41,7 +41,7 @@ function normalizeConnectionHealth(value, options = {}) {
     const bound = entry.bound === true;
     const platformReady = entry.platformReady === true;
     const protocolConnected = entry.protocolConnected === true;
-    const state = !options.running || !bound ? 'unknown' : protocolConnected ? 'connected' : platformReady ? 'connecting' : 'offline';
+    const state = !options.running || !bound ? 'unknown' : protocolConnected ? 'connected' : !platformReady ? 'offline' : entry.gatewayBlocked === true ? 'blocked' : 'connecting';
     channels[channel] = { bound, platformReady, protocolConnected, state };
   }
   return { format: 2, updatedAt: value.updatedAt, channels };
