@@ -123,7 +123,7 @@ def test_activity_does_not_count_as_human_and_failure_is_not_sent(tmp_path):
         assert store.state(SCOPE)["unanswered"] == 0
 
 
-def test_bili_share_uses_same_quiet_daily_and_unanswered_budget(tmp_path):
+def test_bili_share_respects_quiet_and_its_own_daily_budget(tmp_path):
     from dataclasses import replace
     from datetime import datetime
     from zoneinfo import ZoneInfo
@@ -136,7 +136,8 @@ def test_bili_share_uses_same_quiet_daily_and_unanswered_budget(tmp_path):
         Settings(),
         official_owner_umo="qq:FriendMessage:123",
         proactive_enabled=True,
-        daily_limit=1,
+        daily_limit=0,
+        bili_enabled=True,
     )
     store = Store(tmp_path / "state.db")
     scheduler = Scheduler(cfg, store)
@@ -213,3 +214,41 @@ def test_upgrade_releases_only_known_legacy_video_failures_once(tmp_path):
             assert upgraded.state(SCOPE)["unanswered"] == 1
             assert upgraded.count_local_day((SCOPE,), NOW.date().isoformat()) == 4
             assert upgraded.activity("uncertain-send").status == "uncertain"
+
+
+def test_video_recommendation_and_silent_chat_have_separate_limits(tmp_path):
+    cfg = settings(
+        daily_limit=2,
+        unanswered_limit=1,
+        proactive_continue_unanswered=True,
+        bili_enabled=True,
+    )
+    with Store(tmp_path / "state.db") as store:
+        scheduler = Scheduler(cfg, store)
+        scheduler.reserve(NOW)
+        first_time = NOW + timedelta(hours=2)
+        first = scheduler.reserve(first_time)
+        assert first and first.kind == "chat"
+        video = scheduler.reserve(first_time, external_kind="bili-share")
+        assert video
+        for item in (first, video):
+            store.transition(item.id, "queued", first_time.timestamp())
+            assert store.mark_submission(item.id)
+            store.transition(item.id, "uncertain", first_time.timestamp())
+        assert store.state(SCOPE)["unanswered"] == 1
+        assert (
+            scheduler.reserve(first_time + timedelta(hours=1), external_kind="bili-share") is None
+        )
+        second = scheduler.reserve(first_time + timedelta(hours=2))
+        assert second and second.kind == "chat"
+        assert store.transition(second.id, "failed", first_time.timestamp() + 7200)
+        assert scheduler.reserve(first_time + timedelta(hours=4)) is None
+
+
+def test_bili_can_recommend_when_chat_is_disabled(tmp_path):
+    with Store(tmp_path / "state.db") as store:
+        scheduler = Scheduler(settings(proactive_enabled=False, bili_enabled=True), store)
+        assert not scheduler.reserve(NOW)
+        assert scheduler.reserve(NOW, external_kind="bili-share")
+        store.set_paused(SCOPE, True)
+        assert not scheduler.reserve(NOW + timedelta(days=1), external_kind="bili-share")

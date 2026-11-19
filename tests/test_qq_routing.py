@@ -1,5 +1,7 @@
 """Channel bindings: passive authorization never follows the default delivery."""
 
+from datetime import timedelta
+
 import pytest
 
 from dswhale.config import Settings
@@ -102,6 +104,7 @@ def _scheduler(tmp_path, **extra):
             "qq_connection_mode": "napcat",
             "qq_default_delivery": "",
             "proactive_enabled": True,
+            "bili_enabled": True,
             "quiet_start": "00:00",
             "quiet_end": "00:00",
             "min_interval_minutes": 5,
@@ -125,19 +128,16 @@ def _finish_activity(activity, store, now):
     store.transition(activity.id, "sent", now.timestamp())
 
 
-def test_proactive_budget_is_shared_across_both_channels(tmp_path):
+def test_video_budget_is_shared_across_scope_order(tmp_path):
     scheduler, store, now = _scheduler(tmp_path)
     first = scheduler.reserve(now, external_kind="bili-note")
     assert first is not None and first.scope == OFF_SCOPE
     _finish_activity(first, store, now)
-    second = scheduler.reserve(now, external_kind="bili-note")
-    assert second is not None
-    _finish_activity(second, store, now)
-    assert scheduler.reserve(now, external_kind="bili-note") is None
+    assert scheduler.reserve(now, external_kind="bili-share", scopes=[NAP_SCOPE, OFF_SCOPE]) is None
     store.close()
 
 
-def test_a_pending_activity_on_either_channel_blocks_new_autonomy(tmp_path):
+def test_a_pending_video_on_either_scope_blocks_another_video(tmp_path):
     scheduler, store, now = _scheduler(tmp_path)
     activity = scheduler.reserve(now, external_kind="bili-watch", scopes=[OFF_SCOPE, NAP_SCOPE])
     assert activity is not None and activity.scope == OFF_SCOPE
@@ -145,18 +145,22 @@ def test_a_pending_activity_on_either_channel_blocks_new_autonomy(tmp_path):
     store.close()
 
 
-def test_any_channel_human_message_resets_the_shared_budget(tmp_path):
+def test_any_bound_human_message_resets_unanswered_chat(tmp_path):
     scheduler, store, now = _scheduler(tmp_path)
+    scopes = [OFF_SCOPE, NAP_SCOPE]
+    assert scheduler.reserve(now, scopes=scopes) is None
     for _ in range(2):
-        activity = scheduler.reserve(now, external_kind="bili-note")
+        now += timedelta(minutes=5)
+        activity = scheduler.reserve(now, scopes=scopes)
         assert activity is not None
         _finish_activity(activity, store, now)
-    assert scheduler.reserve(now, external_kind="bili-note") is None
-    scheduler.human_received(now, scopes=[OFF_SCOPE, NAP_SCOPE])
-    for scope in (OFF_SCOPE, NAP_SCOPE):
+    now += timedelta(minutes=5)
+    assert scheduler.reserve(now, scopes=scopes) is None
+    scheduler.human_received(now, scopes=scopes)
+    for scope in scopes:
         assert store.state(scope)["unanswered"] == 0
         assert store.state(scope)["last_human"] == now.timestamp()
-    activity = scheduler.reserve(now, external_kind="bili-note")
+    activity = scheduler.reserve(now + timedelta(minutes=5), scopes=scopes)
     assert activity is not None and activity.scope == OFF_SCOPE
     store.close()
 

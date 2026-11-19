@@ -207,19 +207,19 @@
       <div class="section-heading"><h2>环境组件</h2><span>${data.state.components.length ? `${data.state.components.length} 项` : '检查后显示'}</span></div><section class="card component-table"><table><thead><tr><th scope="col">组件</th><th scope="col">版本</th><th scope="col">状态</th></tr></thead><tbody>${data.state.components.length ? data.state.components.map(c => { const status = labels[c.status] || labels.unknown; return `<tr><td><strong>${esc(c.label)}</strong><span class="component-detail">${esc(c.detail)}</span></td><td class="version-text">${esc(c.version || '—')}</td><td>${badge(status[0], status[1])}</td></tr>`; }).join('') : '<tr><td colspan="3" class="empty-state">尚无检查结果。点击「重新检查」获取本机状态。</td></tr>'}</tbody></table></section>${versionMatrix(data)}${upstreamNotice(data)}${healthCard(data)}<p class="footnote">${icon('shield')}环境准备不会启动对话服务。升级应用时，会保留你的配置、记忆和备份。</p>`;
   }
   function videoDiscoveryNote(data) {
-    if (!data.state.running || !data.settings?.proactiveEnabled) return '';
+    if (!data.state.running) return '';
     const state = data.workspace?.official?.videoDiscovery;
     const message = {
-      invalid: '视频发现地址无效，主动聊天会先用文字开场。',
-      unavailable: '视频发现服务暂不可用，主动聊天会先用文字开场。',
-      'video-error': '上次视频读取未完成，主动聊天已改用文字开场。',
+      invalid: 'OpenBiliClaw 地址无效。',
+      unavailable: 'OpenBiliClaw 视频发现暂不可用。',
+      'video-error': 'OpenBiliClaw 上次视频读取未完成。',
     }[state];
     return message ? `<p class="inline-note" role="status">${esc(message)}</p>` : '';
   }
   function connect(data) {
     const value = draft || data.settings;
     if (!value) return `<section class="page-heading"><h1>QQ 官方机器人</h1></section><section class="card">${button('读取连接设置','settings-get',{off:!desktop(data)||busy(data)})}</section>`;
-    return `<section class="page-heading"><h1>QQ 官方机器人</h1>${button('检查状态','connections-status',{off:!desktop(data)||busy(data)})}</section><form id="connection-form">${officialCard(data)}${preference(data,value,'proactiveEnabled','主动找你聊','聊完隔一阵，大肥鱼会在安静时段以外主动开个话题。')}${videoDiscoveryNote(data)}${connectionOptions(data,value)}<div class="card-actions">${button('保存设置','save-settings',{off:!desktop(data)||busy(data)})}</div></form>`;
+    return `<section class="page-heading"><h1>QQ 官方机器人</h1>${button('检查状态','connections-status',{off:!desktop(data)||busy(data)})}</section><form id="connection-form">${officialCard(data)}${preference(data,value,'proactiveEnabled','主动找你聊','聊完隔一阵，大肥鱼会在安静时段以外主动开个话题。')}${preference(data,value,'continueUnanswered','没回复也偶尔来聊','按原间隔和每天的次数来，安静时段休息。')}${preference(data,value,'dailyDiaryEnabled','晚上写日记','23 点交给聊天模型整理前一天收到的文字，在本机保存日记和记忆。用 /fish diary 查看。')}${connectionOptions(data,value)}<div class="card-actions">${button('保存设置','save-settings',{off:!desktop(data)||busy(data)})}</div></form>`;
   }
   function extensionCard(data, id) {
     const value = data.extensions?.[id];
@@ -251,14 +251,16 @@
   }
   function bilibili(data) {
     const value = draft || data.settings;
-    return `<section class="page-heading"><div><h1>哔哩哔哩</h1><p class="subtitle">管理关注、动态与视频相关能力。</p></div>${badge(data.state.setup.biliEnabled ? '已启用' : '未启用', data.state.setup.biliEnabled ? 'good' : '')}</section><section class="card bili-card"><span class="feature-icon pink">${icon('bilibili')}</span><h2>把喜欢的内容，带进对话。</h2><p>在完整设置面板中管理登录状态、关注与订阅规则。<br>沿用现有配置，在当前窗口继续操作。</p>${button('打开哔哩哔哩设置', 'open-panel', { primary: true, payload: 'bilibili', iconName: 'arrow', off: !desktop(data) || !data.state.running || busy(data) })}</section><section class="card preference-card"><div><h3>启用哔哩哔哩功能</h3><p>保存后生效。登录与详细订阅请在完整设置中管理。</p></div><label class="switch"><input id="biliEnabled" type="checkbox"${(value?.biliEnabled ?? data.state.setup.biliEnabled) ? ' checked' : ''}${disabled(!desktop(data) || !value || busy(data))}><span aria-hidden="true"></span><span class="sr-only">启用哔哩哔哩功能</span></label></section>${dirtyFields.size ? `<div class="form-footer"><p>有未保存的更改</p>${button('保存设置', 'save-settings', { primary: true, off: !desktop(data) || busy(data) })}</div>` : ''}${!data.state.running ? '<p class="footnote">启动服务后，可打开完整哔哩哔哩设置。</p>' : ''}${healthCard(data,true)}`;
+    return `<section class="page-heading"><div><h1>哔哩哔哩</h1><p class="subtitle">按视频作息看一看，遇到有趣的就分享。</p></div>${badge(data.state.setup.biliEnabled ? '已启用' : '未启用', data.state.setup.biliEnabled ? 'good' : '')}</section><section class="card bili-card"><span class="feature-icon pink">${icon('bilibili')}</span><h2>视频与推荐</h2><p>设置看视频的作息和推荐渠道。QQ 自动视频活动每天最多一次。</p>${button('打开哔哩哔哩设置', 'open-panel', { primary: true, payload: 'bilibili', iconName: 'arrow', off: !desktop(data) || !data.state.running || busy(data) })}</section><section class="card preference-card"><div><h3>启用哔哩哔哩功能</h3><p>保存后生效。登录与详细订阅请在完整设置中管理。</p></div><label class="switch"><input id="biliEnabled" type="checkbox"${(value?.biliEnabled ?? data.state.setup.biliEnabled) ? ' checked' : ''}${disabled(!desktop(data) || !value || busy(data))}><span aria-hidden="true"></span><span class="sr-only">启用哔哩哔哩功能</span></label></section>${dirtyFields.size ? `<div class="form-footer"><p>有未保存的更改</p>${button('保存设置', 'save-settings', { primary: true, off: !desktop(data) || busy(data) })}</div>` : ''}${!data.state.running ? '<p class="footnote">启动服务后，可打开完整哔哩哔哩设置。</p>' : ''}${videoDiscoveryNote(data)}${healthCard(data,true)}`;
   }
   const settingLabels={
     dashboardPort:'控制台端口',
     qqConnectionMode:'接入方式',
     officialOwnerUMO:'官方私聊绑定',
     biliEnabled:'B站整合',
-    proactiveEnabled:'主动互动',
+    proactiveEnabled:'主动聊天',
+    continueUnanswered:'没回复也偶尔来聊',
+    dailyDiaryEnabled:'晚上写日记',
     defaultDelivery:'主动消息渠道',
     replyStyleMode:'回复方式',
     replyStyleMaxBubbles:'回复目标条数',
@@ -269,7 +271,7 @@
     replyStyleCustomCleanup:'回复自定义清理',
   };
   const historyRestoreFields=new Set([
-    'officialOwnerUMO','dashboardPort','biliEnabled','proactiveEnabled',
+    'officialOwnerUMO','dashboardPort','biliEnabled','proactiveEnabled','continueUnanswered','dailyDiaryEnabled',
     'replyStyleMode','replyStyleMaxBubbles','replyStyleInterval','replyStylePunctuation',
     'replyStylePrompt','replyStyleCustomRegex','replyStyleCustomCleanup',
   ]);
@@ -497,7 +499,7 @@
     if(target.id==='app-update-channel'){updateChannel=target.value;return;}
 
     if(target.id.startsWith('pref-')){if(!preferencesDraft)preferencesDraft={...controller.get().workspace.preferences};preferencesDraft[target.id.slice(5)]=target.checked===true;preferencesDirty=true;return;}
-    if(!['dashboardPort','biliEnabled','proactiveEnabled','officialOwnerUMO'].includes(target.id))return;
+    if(!['dashboardPort','biliEnabled','proactiveEnabled','continueUnanswered','dailyDiaryEnabled','officialOwnerUMO'].includes(target.id))return;
     markDraft(target.id, target.type === 'checkbox' ? target.checked : target.value);
   }
   async function saveSettings() {

@@ -58,13 +58,15 @@ DSWhale 的 `vision_provider_id` 填图片模型的完整 Provider ID，可从�
 | --- | --- |
 | 时区 | Asia/Shanghai |
 | 免打扰 | 23:00–08:00 |
-| 活动间隔 | 随机 120–240 分钟 |
+| 聊天间隔 | 随机 30–75 分钟 |
 | 每日上限 | 3 次尝试 |
 | 连续未回复上限 | 2 次 |
 
 失败同样计入活动次数。首次启动需要等待一个活动间隔，收到用户消息后重新计时；重启不会清空预算。`/fish pause` 暂停主动聊天和 B站活动，普通私聊仍可使用；`/fish start` 恢复活动。
 
-自主选题推荐请继续配置 [B站功能](bilibili.md)。也可独立运行 [OpenBiliClaw](https://github.com/whiteguo233/OpenBiliClaw)，在 DSWhale 设置 `content_url` 后开启 `discover_enabled`。需要鉴权时，`content_token_env` 填环境变量名，令牌由启动环境提供。
+要在没收到回复时继续主动聊天，开启 `proactive_continue_unanswered`。仍遵守间隔、每日次数和免打扰。夜间日记的配置见[官方 QQ 接入指南](qq-official.md#晚上写日记)。
+
+自主选题推荐请继续配置 [B站功能](bilibili.md)。也可独立运行 [OpenBiliClaw](https://github.com/whiteguo233/OpenBiliClaw)，在 DSWhale 设置 `content_url` 后开启 `discover_enabled`。此方式按本地时间在 18:00–23:00 内尝试发现一条视频，使用独立的视频额度。需要鉴权时，`content_token_env` 填环境变量名，令牌由启动环境提供。
 
 ## 接入现有 AstrBot
 

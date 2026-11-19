@@ -30,7 +30,7 @@ def enqueue_watch(service, event, topic):
     if service.settings.is_quiet(now):
         return "现在是安静时段，白天再喊我去看吧"
     if not service.allowed():
-        return "主动活动未开启，先在插件设置里开启"
+        return "B站活动未开启，先在插件设置里开启"
     if not service.settings.bili_qq_recommendations:
         return "QQ推送关闭着，先打开再喊我去看，免得看完没法告诉你"
     if not isinstance(topic, str) or len(topic) > 200:
@@ -51,7 +51,7 @@ def enqueue_watch(service, event, topic):
         now, external_kind="bili-watch", scopes=scopes, target_scope=binding.umo
     )
     if not activity:
-        return "今天额度到了、还有未回复活动或任务处理中，这次先不去看"
+        return "今天的看视频额度到了，或还有视频任务处理中，这次先不去看"
     prompt = (
         "主人从 QQ 请你现在用自己的 B站账号看视频，无需主人给链接。先读日记/偏好，再 feed 或按主题 search。"
         "按 night.maxVideos 初筛（最多5条），挑1–2条深读；使用 debrief、subtitles，"

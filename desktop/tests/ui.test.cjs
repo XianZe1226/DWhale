@@ -70,6 +70,9 @@ test('settings payload serializes only supplied fields and excludes hasModels', 
   assert.deepEqual(settingsPayload({}), {});
   assert.equal(settingsPayload({ proactiveEnabled: false }).proactiveEnabled, false);
   assert.equal('biliEnabled' in settingsPayload({ proactiveEnabled: false }), false);
+  assert.deepEqual(settingsPayload({ continueUnanswered: true, dailyDiaryEnabled: true }), {
+    continueUnanswered: true, dailyDiaryEnabled: true,
+  });
   assert.throws(() => settingsPayload({ dashboardPort: '0' }), /端口/);
   assert.throws(() => settingsPayload({ dashboardPort: '6199.5' }), /端口/);
   assert.throws(() => settingsPayload({ proactiveEnabled: TrueValue }), /开关/);
@@ -717,7 +720,7 @@ test('settings page shows recent local changes and restores one field with the r
   for (let i = 0; i < 8; i++) await app.settle();
   assert.match(app.html(), /最近修改/);
   assert.match(app.html(), /升级保护检查：迁移版本 1/);
-  assert.match(app.html(), /恢复主动互动/);
+  assert.match(app.html(), /恢复主动聊天/);
   const restore = app.html().match(/data-action="settings-restore-field"[^>]*data-record="([^"]+)"[^>]*data-field="([^"]+)"/);
   assert.ok(restore);
   await app.clickWithDataset('settings-restore-field');

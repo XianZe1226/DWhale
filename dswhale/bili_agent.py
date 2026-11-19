@@ -113,7 +113,7 @@ async def share_qq(service, text, bvid="", reason="", score=0, rank=1):
         return "日记摘要推送已关闭。"
     c = service.companion
     # Resolve the destination before reserving budget: a required-but-unbound
-    # origin (or missing default) must not consume a proactive slot.
+    # origin (or missing default) must not consume a video slot.
     binding = job_binding(service)
     if not c.delivery_platform_ready(binding):
         return "当前 QQ 连接未在线，没有发送。"
@@ -122,7 +122,7 @@ async def share_qq(service, text, bvid="", reason="", score=0, rank=1):
         now, external_kind="bili-share" if bvid else "bili-note", target_scope=binding.umo
     )
     if not activity:
-        return "QQ 的每日预算、未回复限制或暂停规则阻止了本次发送。"
+        return "视频推荐的每日预算、当前任务或暂停规则阻止了本次发送。"
     try:
         if bvid:
             # Record the attempt before transport; an uncertain send must not be retried.

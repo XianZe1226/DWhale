@@ -25,8 +25,8 @@
   function escapeHTML(value) {
     return String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   }
-  const settingsFields = new Set(['qqConnectionMode','officialOwnerUMO','dashboardPort','biliEnabled','proactiveEnabled','defaultDelivery','replyStyleMode','replyStyleMaxBubbles','replyStyleInterval','replyStylePunctuation','replyStylePrompt','replyStyleCustomRegex','replyStyleCustomCleanup']);
-  const settingsSwitches = new Set(['biliEnabled','proactiveEnabled','replyStylePrompt']);
+  const settingsFields = new Set(['qqConnectionMode','officialOwnerUMO','dashboardPort','biliEnabled','proactiveEnabled','continueUnanswered','dailyDiaryEnabled','defaultDelivery','replyStyleMode','replyStyleMaxBubbles','replyStyleInterval','replyStylePunctuation','replyStylePrompt','replyStyleCustomRegex','replyStyleCustomCleanup']);
+  const settingsSwitches = new Set(['biliEnabled','proactiveEnabled','continueUnanswered','dailyDiaryEnabled','replyStylePrompt']);
   function settingsPayload(value) {
     // Only serialize fields the caller actually supplied. Missing fields are not
     // user intent: they must never become false/'' defaults in a save request.
@@ -234,7 +234,7 @@
       data.state = { ...data.state, ...state, platform: { ...data.state.platform, ...state.platform }, setup: { ...data.state.setup, ...state.setup } };
     }
     if (!available && preview) {
-      merge({ version: '0.4.0a6', platform: { id: 'darwin-arm64', label: 'macOS · Apple Silicon', supported: true }, components: [
+      merge({ version: '0.4.0a7', platform: { id: 'darwin-arm64', label: 'macOS · Apple Silicon', supported: true }, components: [
         { id: 'python', label: 'Python', version: '3.12', status: 'missing', detail: '将安装到独立环境' },
         { id: 'node', label: 'Node.js', version: '22 LTS', status: 'missing', detail: '用于扩展与网页能力' },
         { id: 'ffmpeg', label: 'FFmpeg', version: '6+', status: 'missing', detail: '音频与视频处理' },

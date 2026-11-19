@@ -293,7 +293,7 @@ class BiliService:
             and not c.closed
             and bool(self.settings.owner_scope)
             and not c.store.state(self.settings.owner_scope)["paused"]
-            and self.settings.proactive_enabled
+            and self.settings.bili_enabled
             and not self.settings.is_quiet(now_utc())
         )
 

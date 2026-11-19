@@ -30,6 +30,8 @@ FIELDS = {
     "dashboardPort",
     "biliEnabled",
     "proactiveEnabled",
+    "continueUnanswered",
+    "dailyDiaryEnabled",
     "defaultDelivery",
     "replyStyleMode",
     "replyStyleMaxBubbles",
@@ -87,6 +89,8 @@ def read_settings(host):
         "onebotToken": "",
         "biliEnabled": bool(fish.get("bili_enabled", False)),
         "proactiveEnabled": bool(fish.get("proactive_enabled", False)),
+        "continueUnanswered": bool(fish.get("proactive_continue_unanswered", False)),
+        "dailyDiaryEnabled": bool(fish.get("daily_diary_enabled", False)),
         "signatureEnabled": False,
         "qzoneEnabled": False,
         "defaultDelivery": "official",
@@ -323,11 +327,7 @@ def _validated_patch(patch):
         if key == "dashboardPort":
             if isinstance(value, bool) or not isinstance(value, int):
                 raise ValueError("端口需要为 1024–65535 的整数")
-        elif key in {
-            "biliEnabled",
-            "proactiveEnabled",
-            "replyStylePrompt",
-        }:
+        elif key in SWITCH_FIELDS | {"continueUnanswered", "replyStylePrompt"}:
             if not isinstance(value, bool):
                 raise ValueError("开关值无效")
         elif key == "replyStyleMaxBubbles":
@@ -339,7 +339,7 @@ def _validated_patch(patch):
 
 
 OFFICIAL_FIELDS = {"officialOwnerUMO"}
-SWITCH_FIELDS = {"biliEnabled", "proactiveEnabled"}
+SWITCH_FIELDS = {"biliEnabled", "proactiveEnabled", "dailyDiaryEnabled"}
 
 
 def _validated_official_binding(host, config, fish, official):
@@ -408,7 +408,7 @@ def _validate_active_switches(fish, value):
             "qq_default_delivery": str(fish.get("qq_default_delivery", "")),
         }
     )
-    if (value["proactiveEnabled"] or value["biliEnabled"]) and not probe.owner_scope:
+    if any(value[key] for key in SWITCH_FIELDS) and not probe.owner_scope:
         raise ValueError("请先绑定 QQ 用户，再启用主动功能")
 
 
@@ -581,10 +581,6 @@ def save_settings(host, patch, expected_revision=None):
             config, fish = candidate["config"], candidate["fish"]
             before_settings = read_settings(host)
             value = {**before_settings, **patch}
-            switches = ("biliEnabled", "proactiveEnabled")
-            for key in switches:
-                if key in patch and not isinstance(patch[key], bool):
-                    raise ValueError("开关值无效")
             dashboard_port = value["dashboardPort"]
             if "dashboardPort" in patch and (
                 isinstance(dashboard_port, bool)
@@ -611,6 +607,8 @@ def save_settings(host, patch, expected_revision=None):
             for key, fish_key in (
                 ("biliEnabled", "bili_enabled"),
                 ("proactiveEnabled", "proactive_enabled"),
+                ("continueUnanswered", "proactive_continue_unanswered"),
+                ("dailyDiaryEnabled", "daily_diary_enabled"),
             ):
                 if key in patch:
                     fish[fish_key] = value[key]
@@ -651,7 +649,7 @@ def save_settings(host, patch, expected_revision=None):
                     fish[fish_key] = value[key]
             if "defaultDelivery" in patch:
                 target = value["defaultDelivery"]
-                if not target and (value["proactiveEnabled"] or value["biliEnabled"]):
+                if not target and any(value[key] for key in SWITCH_FIELDS):
                     raise ValueError("开启主动功能时请选择一个有效的主动消息渠道")
                 if target:
                     from .config import Settings as _Settings

@@ -18,6 +18,8 @@ class Settings:
     qq_default_delivery: str = "official"
     config_migration_version: int = 0
     proactive_enabled: bool = False
+    proactive_continue_unanswered: bool = False
+    daily_diary_enabled: bool = False
     timezone: str = "Asia/Shanghai"
     quiet_start: str = "23:00"
     quiet_end: str = "08:00"

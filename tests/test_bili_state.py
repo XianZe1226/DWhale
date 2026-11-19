@@ -156,7 +156,7 @@ async def test_agent_uses_astrbot_tools_and_does_not_send_without_owner_grant(
         ledger.close()
 
 
-async def test_qq_recommendation_only_targets_owner_and_respects_shared_budget(tmp_path):
+async def test_qq_recommendation_only_targets_owner_and_respects_video_budget(tmp_path):
     from types import SimpleNamespace
     from unittest.mock import AsyncMock
 
@@ -169,7 +169,8 @@ async def test_qq_recommendation_only_targets_owner_and_respects_shared_budget(t
         {
             "owner_qq": "123",
             "official_owner_umo": "qq:FriendMessage:123",
-            "proactive_enabled": True,
+            "proactive_enabled": False,
+            "bili_enabled": True,
             "quiet_start": "00:00",
             "quiet_end": "00:00",
             "daily_limit": 1,
@@ -235,7 +236,8 @@ async def test_autonomous_bili_share_waits_when_the_target_gateway_is_offline(tm
         {
             "owner_qq": "123",
             "official_owner_umo": "qq:FriendMessage:123",
-            "proactive_enabled": True,
+            "proactive_enabled": False,
+            "bili_enabled": True,
             "quiet_start": "00:00",
             "quiet_end": "00:00",
             "daily_limit": 2,
@@ -305,7 +307,8 @@ async def test_autonomous_agent_share_tool_waits_offline_then_claims_once(tmp_pa
         {
             "owner_qq": "123",
             "official_owner_umo": "qq:FriendMessage:123",
-            "proactive_enabled": True,
+            "proactive_enabled": False,
+            "bili_enabled": True,
             "quiet_start": "00:00",
             "quiet_end": "00:00",
             "daily_limit": 2,
@@ -383,6 +386,6 @@ async def test_autonomous_agent_share_tool_waits_offline_then_claims_once(tmp_pa
         activities = store.recent_activities(cfg.owner_scope)
         assert len(activities) == 1
         assert activities[0]["kind"] == "bili-share"
-        assert store.state(cfg.owner_scope)["unanswered"] == 1
+        assert store.state(cfg.owner_scope)["unanswered"] == 0
     finally:
         store.close()

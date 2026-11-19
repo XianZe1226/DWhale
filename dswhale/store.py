@@ -6,6 +6,10 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
+CHAT_KINDS = ("chat", "video")  # Alpha 6 recorded video-assisted chats as "video".
+AUTO_VIDEO_KINDS = ("video-discovery", "bili-share", "bili-note")
+VIDEO_KINDS = (*AUTO_VIDEO_KINDS, "bili-watch")
+
 
 @dataclass(frozen=True)
 class Activity:
@@ -94,29 +98,38 @@ class Store:
         self.state(scope)
         self.db.execute("UPDATE sessions SET paused=? WHERE scope=?", (paused, scope))
 
-    def count_local_day(self, scopes, local_day, db=None):
+    def count_local_day(self, scopes, local_day, db=None, *, kinds=None):
         scopes = tuple(dict.fromkeys(str(scope) for scope in scopes if scope))
         if not scopes:
             return 0
         placeholders = ",".join("?" for _ in scopes)
+        kind_filter, kind_values = self._kind_filter(kinds)
         return (
             (db or self.db)
             .execute(
-                f"SELECT COUNT(*) FROM activities WHERE scope IN ({placeholders}) AND local_day=?",
-                (*scopes, local_day),
+                f"SELECT COUNT(*) FROM activities WHERE scope IN ({placeholders}) AND local_day=?"
+                + kind_filter,
+                (*scopes, local_day, *kind_values),
             )
             .fetchone()[0]
         )
 
-    def has_pending(self, scopes, db=None):
+    @staticmethod
+    def _kind_filter(kinds):
+        if kinds is None:
+            return "", ()
+        return f" AND kind IN ({','.join('?' for _ in kinds)})", kinds
+
+    def has_pending(self, scopes, db=None, *, kinds=None):
         scopes = tuple(dict.fromkeys(str(scope) for scope in scopes if scope))
         if not scopes:
             return False
         placeholders = ",".join("?" for _ in scopes)
+        kind_filter, kind_values = self._kind_filter(kinds)
         return (db or self.db).execute(
             f"SELECT 1 FROM activities WHERE scope IN ({placeholders}) "
-            "AND status IN ('reserved','queued') LIMIT 1",
-            scopes,
+            "AND status IN ('reserved','queued')" + kind_filter + " LIMIT 1",
+            (*scopes, *kind_values),
         ).fetchone() is not None
 
     def activity(self, activity_id: str) -> Activity | None:
@@ -149,7 +162,7 @@ class Store:
             inserted = db.execute(
                 "INSERT OR IGNORE INTO submitted_activities VALUES (?)", (activity_id,)
             )
-            if inserted.rowcount:
+            if inserted.rowcount and activity.kind in CHAT_KINDS:
                 db.execute(
                     "UPDATE sessions SET unanswered=unanswered+1 WHERE scope=? AND last_human<=?",
                     (activity.scope, activity.created),

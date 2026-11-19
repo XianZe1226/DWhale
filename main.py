@@ -289,6 +289,14 @@ class DSWhale(Star):
             )
         event.stop_event()
 
+    @fish.command("diary")
+    async def diary(self, event: AstrMessageEvent, day: str = ""):
+        if self.companion.authorized(event):
+            yield event.plain_result(
+                self.companion.diary_text(event.unified_msg_origin, day or None)
+            )
+        event.stop_event()
+
     @fish.command("voice")
     async def voice(self, event: AstrMessageEvent, text: str):
         if self.companion.authorized(event):

@@ -612,3 +612,26 @@ def test_f7_python_is_authoritative_for_custom_regex(tmp_path):
     for invalid in (r"(a)", r"x*", "("):
         with pytest.raises(ValueError):
             save_settings(host, {"replyStyleCustomRegex": invalid})
+
+
+def test_diary_and_no_reply_preferences_are_opt_in_and_preserve_other_settings(tmp_path):
+    from dswhale.desktop_settings import read_settings, save_settings
+
+    host = _host_with_flags(tmp_path)
+    config_file = host / "data/cmd_config.json"
+    fish_file = host / "data/config/astrbot_plugin_dswhale_config.json"
+    config_before = config_file.read_bytes()
+    fish_before = json.loads(fish_file.read_text())
+    initial = read_settings(host)
+    assert initial["continueUnanswered"] is False
+    assert initial["dailyDiaryEnabled"] is False
+    saved = save_settings(host, {"continueUnanswered": True, "dailyDiaryEnabled": True})
+    assert saved["continueUnanswered"] is True
+    assert saved["dailyDiaryEnabled"] is True
+    assert config_file.read_bytes() == config_before
+    fish = json.loads(fish_file.read_text())
+    assert fish == {
+        **fish_before,
+        "proactive_continue_unanswered": True,
+        "daily_diary_enabled": True,
+    }

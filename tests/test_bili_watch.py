@@ -79,10 +79,9 @@ def test_chat_gate_cannot_bypass_owner_quiet_budget_or_stopped_host(watching):
     )
     assert "安静时段" in c.request_bili_watch(event(c.context), "")
     c.settings = service.settings = Settings.from_mapping(
-        {**vars(c.settings), "quiet_end": "00:00"}
+        {**vars(c.settings), "quiet_end": "00:00", "daily_limit": 0}
     )
     c.scheduler.settings = c.settings
-    c.store.db.execute("update sessions set unanswered=100")
     assert "额度" in c.request_bili_watch(event(c.context), "")
     assert service.ledger.next_job() is None
 

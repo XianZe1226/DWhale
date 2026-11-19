@@ -5,7 +5,7 @@ import uuid
 from datetime import datetime
 
 from .config import Settings
-from .store import Activity, Store
+from .store import AUTO_VIDEO_KINDS, CHAT_KINDS, VIDEO_KINDS, Activity, Store
 
 
 class Scheduler:
@@ -43,8 +43,12 @@ class Scheduler:
                 (now.timestamp(), due, scope),
             )
 
-    def _availability(self, online: bool):
-        if not self.settings.proactive_enabled:
+    def _availability(self, online: bool, kind="chat"):
+        enabled = {
+            "chat": self.settings.proactive_enabled,
+            "video-discovery": self.settings.discover_enabled,
+        }.get(kind, self.settings.bili_enabled)
+        if not enabled:
             return "disabled"
         if not self.settings.owner_scope:
             return "unbound"
@@ -52,21 +56,35 @@ class Scheduler:
             return "offline"
         return None
 
-    def _decision(self, now, scopes, *, external, db=None):
+    def _decision(self, now, scopes, *, kind, db=None):
         cfg = self.settings
         states = [self.store.state(scope) for scope in scopes]
         if any(state["paused"] for state in states):
             return "paused", None
         if cfg.is_quiet(now):
             return "quiet", None
-        if max(state["unanswered"] for state in states) >= cfg.unanswered_limit:
+        chat = kind == "chat"
+        if (
+            chat
+            and not cfg.proactive_continue_unanswered
+            and max(state["unanswered"] for state in states) >= cfg.unanswered_limit
+        ):
             return "awaiting_reply", None
-        if self.store.has_pending(scopes, db=db):
+        if self.store.has_pending(scopes, db=db, kinds=CHAT_KINDS if chat else VIDEO_KINDS):
             return "pending", None
-        local_day = cfg.local_time(now).date().isoformat()
-        if self.store.count_local_day(scopes, local_day, db=db) >= cfg.daily_limit:
+        local = cfg.local_time(now)
+        if kind == "video-discovery" and not 18 <= local.hour < 23:
+            return "waiting", None
+        if kind in AUTO_VIDEO_KINDS:
+            kinds, limit = AUTO_VIDEO_KINDS, 1
+        else:
+            kinds, limit = (CHAT_KINDS if chat else (kind,)), cfg.daily_limit
+        if (
+            self.store.count_local_day(scopes, local.date().isoformat(), db=db, kinds=kinds)
+            >= limit
+        ):
             return "daily_limit", None
-        if external:
+        if not chat:
             return "ready", None
         due = max(
             (state["next_due"] for state in states if state["next_due"] is not None), default=None
@@ -79,7 +97,7 @@ class Scheduler:
         reason = self._availability(online)
         due = None
         if reason is None:
-            reason, due = self._decision(now, self._scopes((scope,)), external=False)
+            reason, due = self._decision(now, self._scopes((scope,)), kind="chat")
         if reason == "waiting":
             next_chat = self.settings.local_time(datetime.fromtimestamp(due, tz=now.tzinfo))
             return f"预计 {next_chat:%m-%d %H:%M} 后找你聊"
@@ -105,9 +123,10 @@ class Scheduler:
         target_scope=None,
         online=True,
     ) -> Activity | None:
-        if external_kind not in {None, "bili-share", "bili-note", "bili-watch"}:
+        if external_kind is not None and external_kind not in VIDEO_KINDS:
             raise ValueError("Unknown activity kind")
-        if reason := self._availability(online):
+        kind = external_kind or "chat"
+        if reason := self._availability(online, kind):
             if external_kind is None:
                 self.last_decision = reason
             return None
@@ -119,7 +138,7 @@ class Scheduler:
             scopes = (target, *scopes)
         ts = now.timestamp()
         with self.store.transaction() as db:
-            reason, _ = self._decision(now, scopes, external=external_kind is not None, db=db)
+            reason, _ = self._decision(now, scopes, kind=kind, db=db)
             if external_kind is None:
                 self.last_decision = reason
             if reason == "unscheduled":
@@ -132,7 +151,7 @@ class Scheduler:
             item = Activity(
                 uuid.uuid4().hex,
                 scope,
-                external_kind or ("video" if cfg.discover_enabled else "chat"),
+                kind,
                 "reserved",
                 ts,
             )
@@ -140,10 +159,11 @@ class Scheduler:
                 "INSERT INTO activities VALUES(?,?,?,?,?,?,?,?)",
                 (item.id, scope, item.kind, local.date().isoformat(), item.status, ts, ts, ""),
             )
-            scheduled = self._next_due(now)
-            for target in scopes:
-                db.execute(
-                    "UPDATE sessions SET next_due=? WHERE scope=?",
-                    (scheduled, target),
-                )
+            if kind == "chat":
+                scheduled = self._next_due(now)
+                for target in scopes:
+                    db.execute(
+                        "UPDATE sessions SET next_due=? WHERE scope=?",
+                        (scheduled, target),
+                    )
             return item

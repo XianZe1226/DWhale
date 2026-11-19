@@ -128,6 +128,7 @@ def companion(tmp_path):
     )
     c = Companion(Host(), settings, Store(tmp_path / "state.db"))
     yield c
+    c.diary.close()
     c.store.close()
 
 
@@ -596,8 +597,8 @@ def test_untrusted_block_encodes_reserved_markup_and_label(label):
     ("enabled", "url", "expected"),
     [
         (False, "https://example.invalid", "未启用"),
-        (True, "https://example.invalid", "等待下次活动检查"),
-        (True, "bad-private-address-secret", "地址无效"),
+        (True, "https://example.invalid", "等待独立的视频时段"),
+        (True, "bad-private-address-secret", "视频发现地址无效"),
     ],
 )
 def test_discovery_status_reports_effective_availability(tmp_path, enabled, url, expected):
@@ -613,7 +614,7 @@ def test_discovery_status_reports_effective_availability(tmp_path, enabled, url,
     c.last_error = "synthetic unrelated error"
     try:
         status = c.status(event(c.context))
-        assert "自动发现视频：" + expected in status
+        assert "OpenBiliClaw：" + expected in status
         if c.content is None:
             assert c.content_error in status
         assert "synthetic unrelated error" in status
@@ -782,18 +783,19 @@ async def test_content_service_failure_still_queues_text_without_charging_unansw
 
     from dswhale.content import ContentError
 
-    moment = NOW + timedelta(hours=2)
+    moment = NOW.replace(hour=18)
     monkeypatch.setattr("dswhale.adapter.now_utc", lambda: moment)
     companion.settings = replace(companion.settings, discover_enabled=True)
     companion.scheduler.settings = companion.settings
     companion.content.recommend = AsyncMock(side_effect=ContentError("private synthetic detail"))
-    await companion.tick(NOW)
+    await companion.tick(moment - timedelta(hours=2))
     await companion.tick(moment)
     queued = companion.context.queue.get_nowait()
     assert "观察资料" not in queued.message_str
+    await companion.video_task
     status = companion.status(event(companion.context))
-    assert "内容服务暂不可用，先用文字开场" in status
-    assert "今日活动次数：1/3" in status
+    assert "内容服务暂不可用" in status
+    assert "今日主动聊天：1/3" in status
     assert companion.store.state(SCOPE)["unanswered"] == 0
     await queued.send(queued.plain_result("合成开场"))
     await queued.send(queued.plain_result("第二条"))
@@ -833,8 +835,9 @@ async def test_video_observation_failure_calls_text_path_and_health_exposes_only
         return_value=[Video("https://www.bilibili.com/video/BV1234567890", "合成视频")]
     )
     monkeypatch.setattr(companion, "watch", AsyncMock(side_effect=MediaError("private detail")))
-    await companion.tick(NOW)
-    await companion.tick(NOW + timedelta(hours=2))
+    await companion.tick(NOW.replace(hour=16))
+    await companion.tick(NOW.replace(hour=18))
+    await companion.video_task
     queued = companion.context.queue.get_nowait()
     assert "观察资料" not in queued.message_str
     companion.write_health()
@@ -852,11 +855,11 @@ async def test_content_service_backoff_recovers_without_blocking_chat(companion)
 
     companion.settings = replace(companion.settings, discover_enabled=True)
     companion.content.recommend = AsyncMock(side_effect=[ContentError("unreachable"), []])
-    await companion._autonomous_prompt(NOW, SCOPE)
+    await companion._discover_video(NOW, SCOPE)
     assert companion.discovery_status == "unavailable"
-    await companion._autonomous_prompt(NOW + timedelta(minutes=5), SCOPE)
+    await companion._discover_video(NOW + timedelta(minutes=5), SCOPE)
     assert companion.content.recommend.await_count == 1
-    await companion._autonomous_prompt(NOW + timedelta(minutes=30), SCOPE)
+    await companion._discover_video(NOW + timedelta(minutes=30), SCOPE)
     assert companion.content.recommend.await_count == 2
     assert companion.discovery_status == "ok"
 
@@ -867,9 +870,11 @@ async def test_invalid_discovery_port_still_queues_text(companion):
     from dswhale.content import ContentClient
 
     companion.settings = replace(companion.settings, discover_enabled=True)
+    companion.scheduler.settings = companion.settings
     companion.content = ContentClient("http://127.0.0.1:not-a-port")
-    await companion.tick(NOW)
-    await companion.tick(NOW + timedelta(hours=2))
+    await companion.tick(NOW.replace(hour=16))
+    await companion.tick(NOW.replace(hour=18))
+    await companion.video_task
     queued = companion.context.queue.get_nowait()
     assert "观察资料" not in queued.message_str
     assert companion.discovery_status == "unavailable"
@@ -927,3 +932,109 @@ async def test_proactive_media_decoration_sends_clean_text_or_spends_no_unanswer
     assert companion.context.send_message.await_count == 1
     assert companion.context.send_message.await_args.args[1].get_plain_text() == "合成文字开场"
     assert companion.store.state(SCOPE)["unanswered"] == 1
+
+
+async def test_chat_keeps_running_while_video_discovery_waits(companion):
+    from dataclasses import replace
+    from unittest.mock import AsyncMock
+
+    c = companion
+    c.settings = replace(c.settings, discover_enabled=True)
+    c.scheduler.settings = c.settings
+    started, release = asyncio.Event(), asyncio.Event()
+
+    async def slow_feed():
+        started.set()
+        await release.wait()
+        return []
+
+    c.content.recommend = AsyncMock(side_effect=slow_feed)
+    evening = NOW.replace(hour=18)
+    await c.tick(evening - timedelta(hours=2))
+    await c.tick(evening)
+    assert c.context.queue.qsize() == 1
+    assert c.content.recommend.await_count == 0
+    await asyncio.wait_for(started.wait(), 1)
+    assert "观察资料" not in c.context.queue.get_nowait().message_str
+    assert c.store.recent_activities(SCOPE, 2)[0]["created"] == evening.timestamp()
+    release.set()
+    await asyncio.gather(*c.workers)
+    assert c.context.queue.empty()
+
+
+async def test_nightly_diary_uses_only_the_previous_days_bound_messages(companion):
+    from dataclasses import replace
+    from unittest.mock import AsyncMock
+
+    c = companion
+    c.settings = replace(c.settings, daily_diary_enabled=True, proactive_enabled=False)
+    c.scheduler.settings = c.settings
+    generate = AsyncMock(
+        return_value=SimpleNamespace(
+            completion_text='{"diary":"昨天聊了徒步","memories":[{"text":"喜欢徒步","source":1}]}'
+        )
+    )
+    c.context.get_using_provider_async = AsyncMock(
+        return_value=SimpleNamespace(meta=lambda: SimpleNamespace(id="synthetic"))
+    )
+    c.context.llm_generate = generate
+    moment = NOW.replace(hour=23)
+    yesterday = event(c.context)
+    yesterday.message_str = "我喜欢徒步"
+    c.observe(yesterday, moment - timedelta(days=1, hours=3))
+    today = event(c.context)
+    today.message_obj.message_id = "today"
+    today.message_str = "今日内容不要混入"
+    c.observe(today, moment - timedelta(hours=3))
+    outsider = event(c.context, "456")
+    outsider.message_str = "旁人内容不要混入"
+    c.observe(outsider, moment - timedelta(days=1, hours=3))
+
+    await c.tick(moment - timedelta(minutes=1))
+    await asyncio.gather(*c.workers)
+    generate.assert_not_called()
+    await c.tick(moment)
+    await asyncio.gather(*c.workers)
+    generate.assert_awaited_once()
+    prompt = generate.await_args.kwargs["prompt"]
+    assert "我喜欢徒步" in prompt
+    assert "今日内容不要混入" not in prompt
+    assert "旁人内容不要混入" not in prompt
+    assert "昨天聊了徒步" in c.diary_text(SCOPE)
+    request = ProviderRequest(prompt="最近有什么想聊的吗")
+    c.enrich(today, request)
+    assert "喜欢徒步" in request.system_prompt
+    c.diary.close()
+    c.diary.finished = None
+    await c.tick(moment + timedelta(minutes=1))
+    await asyncio.gather(*c.workers)
+    generate.assert_awaited_once()
+    assert c.context.queue.empty()
+
+
+async def test_automatic_video_can_recommend_with_chat_off(companion, monkeypatch):
+    from dataclasses import replace
+    from unittest.mock import AsyncMock
+
+    from dswhale.content import Video
+
+    c = companion
+    c.settings = replace(c.settings, discover_enabled=True, proactive_enabled=False)
+    c.scheduler.settings = c.settings
+    moment = NOW.replace(hour=18)
+    monkeypatch.setattr("dswhale.adapter.now_utc", lambda: moment)
+    url = "https://www.bilibili.com/video/BV1234567890"
+    c.content.recommend = AsyncMock(return_value=[Video(url, "合成视频")])
+    monkeypatch.setattr(c, "watch", AsyncMock(return_value=f"合成观察\n{url}"))
+    await c.tick(moment)
+    await c.video_task
+    recommendation = c.context.queue.get_nowait()
+    assert "独立的视频推荐" in recommendation.message_str
+    assert url in recommendation.message_str
+    assert await recommendation.send(recommendation.plain_result(f"这条挺有意思\n{url}"))
+    c.delivered(recommendation, moment)
+    assert c.store.state(SCOPE)["unanswered"] == 0
+    assert c.store.state(SCOPE)["next_due"] is None
+    await c.tick(moment + timedelta(hours=1))
+    assert c.context.queue.empty()
+    c.content.recommend.assert_awaited_once()
