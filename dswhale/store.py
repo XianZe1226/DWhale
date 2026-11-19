@@ -35,9 +35,6 @@ class Store:
                 updated REAL NOT NULL, error TEXT NOT NULL DEFAULT ''
             );
             CREATE INDEX IF NOT EXISTS activities_scope_day ON activities(scope, local_day);
-            CREATE TABLE IF NOT EXISTS submitted_activities (
-                id TEXT PRIMARY KEY REFERENCES activities(id)
-            );
             CREATE TABLE IF NOT EXISTS journals (
                 id INTEGER PRIMARY KEY, scope TEXT NOT NULL, url TEXT NOT NULL,
                 title TEXT NOT NULL, summary TEXT NOT NULL, evidence TEXT NOT NULL,
@@ -48,6 +45,27 @@ class Store:
                 PRIMARY KEY(scope, url)
             );
         """)
+        self._prepare_submission_ledger()
+
+    def _prepare_submission_ledger(self):
+        with self.transaction() as db:
+            if db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='submitted_activities'"
+            ).fetchone():
+                return
+            db.execute(
+                "CREATE TABLE submitted_activities (id TEXT PRIMARY KEY REFERENCES activities(id))"
+            )
+            # Older releases charged on reservation. These recorded video
+            # discovery and read errors arise before any event was queued for QQ.
+            db.execute("""
+                UPDATE sessions SET unanswered=MAX(0, unanswered-(
+                    SELECT COUNT(*) FROM activities
+                    WHERE activities.scope=sessions.scope AND created>=last_human
+                    AND kind='video' AND status='failed'
+                    AND error IN ('ContentError','InvalidURL','MediaError')
+                )) WHERE unanswered>0
+            """)
 
     def __enter__(self):
         return self

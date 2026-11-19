@@ -88,6 +88,8 @@ class DSWhale(Star):
     async def clean_response(self, event: AstrMessageEvent, resp):
         if self.companion.authorized(event):
             resp.completion_text = clean_text(resp.completion_text)
+            if self.companion.internal_id(event):
+                event.set_extra("dswhale_proactive_text", resp.completion_text)
 
     @filter.on_agent_done(priority=100000)
     async def clean_saved(self, event: AstrMessageEvent, run_context, llm_response):

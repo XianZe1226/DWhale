@@ -183,3 +183,33 @@ def test_upgrade_keeps_existing_unanswered_count_and_only_charges_new_submission
         assert current.activity(pending.id).status == "uncertain"
         assert current.state(SCOPE)["unanswered"] == 2
         assert not current.mark_submission(pending.id)
+
+
+def test_upgrade_releases_only_known_legacy_video_failures_once(tmp_path):
+    path = tmp_path / "a5-failed-discovery.db"
+    ts = NOW.timestamp()
+    with Store(path) as old:
+        old.db.execute("DROP TABLE submitted_activities")
+        old.state(SCOPE)
+        old.db.execute(
+            "UPDATE sessions SET unanswered=3,last_human=?,next_due=? WHERE scope=?",
+            (ts - 10, ts, SCOPE),
+        )
+        rows = [
+            ("failed-feed", "video", "failed", ts - 1, "ContentError"),
+            ("failed-address", "video", "failed", ts - 2, "InvalidURL"),
+            ("uncertain-send", "video", "uncertain", ts - 3, "ContentError"),
+            ("previous-chat", "video", "failed", ts - 20, "ContentError"),
+        ]
+        old.db.executemany(
+            "INSERT INTO activities VALUES(?,?,?,?,?,?,?,?)",
+            [
+                (ident, SCOPE, kind, NOW.date().isoformat(), status, created, ts, reason)
+                for ident, kind, status, created, reason in rows
+            ],
+        )
+    for _ in range(2):
+        with Store(path) as upgraded:
+            assert upgraded.state(SCOPE)["unanswered"] == 1
+            assert upgraded.count_local_day((SCOPE,), NOW.date().isoformat()) == 4
+            assert upgraded.activity("uncertain-send").status == "uncertain"

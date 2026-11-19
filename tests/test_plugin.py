@@ -859,3 +859,61 @@ async def test_content_service_backoff_recovers_without_blocking_chat(companion)
     await companion._autonomous_prompt(NOW + timedelta(minutes=30), SCOPE)
     assert companion.content.recommend.await_count == 2
     assert companion.discovery_status == "ok"
+
+
+async def test_invalid_discovery_port_still_queues_text(companion):
+    from dataclasses import replace
+
+    from dswhale.content import ContentClient
+
+    companion.settings = replace(companion.settings, discover_enabled=True)
+    companion.content = ContentClient("http://127.0.0.1:not-a-port")
+    await companion.tick(NOW)
+    await companion.tick(NOW + timedelta(hours=2))
+    queued = companion.context.queue.get_nowait()
+    assert "观察资料" not in queued.message_str
+    assert companion.discovery_status == "unavailable"
+
+
+async def test_proactive_event_removes_the_direct_send_tool_from_its_own_request(companion):
+    from astrbot.core.agent.tool import FunctionTool, ToolSet
+
+    await companion.tick(NOW)
+    await companion.tick(NOW + timedelta(hours=2))
+    queued = companion.context.queue.get_nowait()
+    shared = ToolSet(
+        tools=[
+            FunctionTool(name=name, description="Synthetic test tool", parameters={})
+            for name in ("send_message_to_user", "other_tool")
+        ]
+    )
+    synthetic_request = ProviderRequest(prompt="合成", func_tool=shared)
+    companion.enrich(queued, synthetic_request)
+    assert [tool.name for tool in synthetic_request.func_tool.tools] == ["other_tool"]
+    assert [tool.name for tool in shared.tools] == ["send_message_to_user", "other_tool"]
+    human_request = ProviderRequest(prompt="合成", func_tool=shared)
+    companion.enrich(event(companion.context), human_request)
+    assert human_request.func_tool is shared
+
+
+async def test_proactive_media_decoration_sends_clean_text_or_spends_no_unanswered(
+    companion, monkeypatch
+):
+    from astrbot.api.event import MessageChain
+    from astrbot.api.message_components import Image
+
+    import main
+
+    moment = NOW + timedelta(hours=2)
+    monkeypatch.setattr("dswhale.adapter.now_utc", lambda: moment)
+    await companion.tick(NOW)
+    await companion.tick(moment)
+    queued = companion.context.queue.get_nowait()
+    image_only = MessageChain([Image(file="")])
+    assert await queued.send(image_only) is False
+    assert companion.store.state(SCOPE)["unanswered"] == 0
+    plugin = object.__new__(main.DSWhale)
+    plugin.companion = companion
+    await plugin.clean_response(queued, SimpleNamespace(completion_text="合成文字开场"))
+    assert await queued.send(image_only) is True
+    assert companion.store.state(SCOPE)["unanswered"] == 1

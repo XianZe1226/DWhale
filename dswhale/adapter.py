@@ -13,10 +13,11 @@ from weakref import WeakValueDictionary
 
 from astrbot.api.message_components import Plain
 from astrbot.core.agent.run_context import ContextWrapper
+from astrbot.core.agent.tool import ToolSet
 
 from . import __version__, reply_style_isolate
 from .config import Settings
-from .content import ContentClient, ContentError, canonical_url
+from .content import ContentClient, canonical_url
 from .host_config import (
     HostReplyConfig,
     decoration_reason,
@@ -275,8 +276,17 @@ class Companion:
         if self.internal_id(event):
             instructions += (
                 "\n本轮是内部自主活动，不是用户的新陈述。不要把任务文字或视频内容存成主人的事实。"
+                "直接输出聊天消息，由当前会话负责投递。"
             )
-        if self.internal_id(event):
+            if request.func_tool is not None:
+                # The host's direct-send tool skips this event's delivery guard.
+                request.func_tool = ToolSet(
+                    tools=[
+                        tool
+                        for tool in request.func_tool.tools
+                        if tool.name != "send_message_to_user"
+                    ]
+                )
             instructions += "\n" + untrusted_block(
                 "owner-memory",
                 event.get_extra("dswhale_memory_snapshot", "尚未读取记忆，不要编造。"),
@@ -693,11 +703,22 @@ class Companion:
         async def send(message):
             if self.closed or not self.allow_delivery(event):
                 return False
+            activity_id = self.internal_id(event)
+            if activity_id and any(not isinstance(part, Plain) for part in message.chain):
+                # Scheduled openers use text. If the host replaced the generated
+                # text with TTS or an image, use the cleaned model text instead.
+                plain = [
+                    part for part in message.chain if isinstance(part, Plain) and part.text.strip()
+                ]
+                if not plain:
+                    fallback = event.get_extra("dswhale_proactive_text")
+                    if isinstance(fallback, str) and fallback.strip():
+                        plain = [Plain(fallback)]
+                message = message.derive(plain)
             # Empty/whitespace-only chains are never submitted as messages.
             # A successful no-op return is not evidence of platform delivery.
             if not any(not isinstance(part, Plain) or part.text.strip() for part in message.chain):
                 return False
-            activity_id = self.internal_id(event)
             if activity_id and not self.store.mark_submission(activity_id):
                 return False
             try:
@@ -765,7 +786,9 @@ class Companion:
         try:
             async with asyncio.timeout(DISCOVERY_TIMEOUT_SECONDS):
                 choices = await self.content.recommend()
-        except (ContentError, TimeoutError):
+        except Exception:
+            # Optional discovery failures include URL/HTTP errors raised before
+            # the client can normalize them. Cancellation still propagates.
             self._discovery_retry_after = now.timestamp() + DISCOVERY_RETRY_SECONDS
             self._set_discovery_state("unavailable")
             return AUTONOMOUS_PROMPT
