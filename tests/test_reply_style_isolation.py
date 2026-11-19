@@ -110,29 +110,25 @@ def test_five_concurrent_calls_are_bounded_by_the_same_deadline():
     async def one():
         started = time.monotonic()
         value = await plan_async(text, mode="custom", custom_regex=r"(?:a+)+$", max_bubbles=3)
-        return value, time.monotonic() - started
+        return value, started, time.monotonic()
 
     async def scenario():
-        # Measure all five calls, including their queue/spawn/kill/reap work.
-        # asyncio.run() creates and tears down a separate event loop around
-        # this coroutine; that test-harness work is not a worker deadline.
-        started = time.monotonic()
-        rows = await asyncio.gather(*(one() for _ in range(5)))
-        return rows, time.monotonic() - started
+        return await asyncio.gather(*(one() for _ in range(5)))
 
-    rows, wall = run(scenario())
-    elapsed = [item[1] for item in rows]
+    rows = run(scenario())
     assert len(rows) == 5
-    assert max(elapsed) <= 0.75
-    # The per-call assertion covers queue/spawn/kill/reap. Delivering all five
-    # completed results through gather adds event-loop scheduling overhead.
-    assert wall - max(elapsed) <= 0.10
+    assert max(end - start for _, start, end in rows) <= 0.75
+    # Require the five invocations to overlap. Scheduling before their entry
+    # and after their return is outside the worker deadline.
+    assert max(start for _, start, _ in rows) < min(end for _, _, end in rows)
     # A queued call may either wait out the deadline (unavailable) or acquire a
     # just-released slot and hit the same deadline as timeout. Both are bounded
     # failures; do not require an exact 4+1 split under scheduler load.
-    assert all(value["degraded"] in {"custom_timeout", "custom_unavailable"} for value, _ in rows)
-    assert all(value["customExecuted"] is False for value, _ in rows)
-    assert all(value["bubbles"] == [text] for value, _ in rows)
+    assert all(
+        value["degraded"] in {"custom_timeout", "custom_unavailable"} for value, _, _ in rows
+    )
+    assert all(value["customExecuted"] is False for value, _, _ in rows)
+    assert all(value["bubbles"] == [text] for value, _, _ in rows)
     assert reply_style_isolate.active_workers() == 0
 
 

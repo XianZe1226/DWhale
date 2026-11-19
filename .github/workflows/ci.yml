@@ -16,7 +16,15 @@ jobs:
           python-version: '3.12'
       - name: Install ffmpeg (Linux)
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+        timeout-minutes: 4
+        run: |
+          if ! command -v ffmpeg >/dev/null || ! command -v ffprobe >/dev/null; then
+            apt_network=(-o Acquire::Retries=2 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15)
+            sudo apt-get "${apt_network[@]}" update
+            sudo apt-get "${apt_network[@]}" install -y ffmpeg
+          fi
+          ffmpeg -version
+          ffprobe -version
       - name: Install ffmpeg (macOS)
         if: runner.os == 'macOS'
         run: brew install ffmpeg
