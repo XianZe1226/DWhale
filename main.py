@@ -1,13 +1,13 @@
 """AstrBot plugin entry point; install this repository as astrbot_plugin_dswhale."""
 
 from astrbot.api import AstrBotConfig
-from astrbot.api.event import AstrMessageEvent, filter
+from astrbot.api.event import AstrMessageEvent, ResultContentType, filter
 from astrbot.api.message_components import Plain, Record
 from astrbot.api.star import Context, Star, StarTools
 from astrbot.core.provider.entities import ProviderRequest
 
 if __package__:
-    from .dswhale.adapter import Companion
+    from .dswhale.adapter import Companion, now_utc
     from .dswhale.bili_agent import read_config
     from .dswhale.config import Settings
     from .dswhale.persona import untrusted_block
@@ -17,7 +17,7 @@ if __package__:
     from .dswhale.reply_cleanup import clean_content, clean_history, clean_stream, clean_text
     from .dswhale.store import Store
 else:  # local SDK smoke tests
-    from dswhale.adapter import Companion
+    from dswhale.adapter import Companion, now_utc
     from dswhale.bili_agent import read_config
     from dswhale.config import Settings
     from dswhale.persona import untrusted_block
@@ -75,7 +75,21 @@ class DSWhale(Star):
     @filter.custom_filter(OwnerOnly, False, priority=100)
     async def observe(self, event: AstrMessageEvent):
         self.companion.observe(event)
-        self.companion.allow_delivery(event)
+        if not self.companion.allow_delivery(event):
+            return
+        if self.companion.internal_id(event):
+            draft = event.get_extra("dswhale_spontaneous_draft")
+            if isinstance(draft, str) and draft:
+                # The decision already generated the message. Deliver it as a
+                # model result so AstrBot's safety and reply hooks still run.
+                event.is_at_or_wake_command = False
+                try:
+                    yield event.plain_result(draft).set_result_content_type(
+                        ResultContentType.LLM_RESULT
+                    )
+                finally:
+                    event.stop_event()
+                    self.companion.delivered(event)
 
     @filter.on_llm_request()
     async def enrich(self, event: AstrMessageEvent, req: ProviderRequest):
@@ -216,6 +230,8 @@ class DSWhale(Star):
         if self.companion.authorized(event):
             for scope in self._bound_scopes(event):
                 self.companion.store.set_paused(scope, True)
+                if self.companion.settings.spontaneous_chat:
+                    self.companion.initiative.after_human(scope, now_utc())
             await self.companion.pause_bili()
             yield event.plain_result("主动聊天与自动看视频已暂停；普通聊天仍可使用。")
         event.stop_event()

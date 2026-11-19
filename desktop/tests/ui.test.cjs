@@ -73,6 +73,7 @@ test('settings payload serializes only supplied fields and excludes hasModels', 
   assert.deepEqual(settingsPayload({ continueUnanswered: true, dailyDiaryEnabled: true }), {
     continueUnanswered: true, dailyDiaryEnabled: true,
   });
+  assert.deepEqual(settingsPayload({ spontaneousChat: true }), { spontaneousChat: true });
   assert.throws(() => settingsPayload({ dashboardPort: '0' }), /端口/);
   assert.throws(() => settingsPayload({ dashboardPort: '6199.5' }), /端口/);
   assert.throws(() => settingsPayload({ proactiveEnabled: TrueValue }), /开关/);

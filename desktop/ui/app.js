@@ -219,7 +219,7 @@
   function connect(data) {
     const value = draft || data.settings;
     if (!value) return `<section class="page-heading"><h1>QQ 官方机器人</h1></section><section class="card">${button('读取连接设置','settings-get',{off:!desktop(data)||busy(data)})}</section>`;
-    return `<section class="page-heading"><h1>QQ 官方机器人</h1>${button('检查状态','connections-status',{off:!desktop(data)||busy(data)})}</section><form id="connection-form">${officialCard(data)}${preference(data,value,'proactiveEnabled','主动找你聊','聊完隔一阵，大肥鱼会在安静时段以外主动开个话题。')}${preference(data,value,'continueUnanswered','没回复也偶尔来聊','按原间隔和每天的次数来，安静时段休息。')}${preference(data,value,'dailyDiaryEnabled','晚上写日记','23 点交给聊天模型整理前一天收到的文字，在本机保存日记和记忆。用 /fish diary 查看。')}${connectionOptions(data,value)}<div class="card-actions">${button('保存设置','save-settings',{off:!desktop(data)||busy(data)})}</div></form>`;
+    return `<section class="page-heading"><h1>QQ 官方机器人</h1>${button('检查状态','connections-status',{off:!desktop(data)||busy(data)})}</section><form id="connection-form">${officialCard(data)}${preference(data,value,'proactiveEnabled','主动找你聊','聊完隔一阵，大肥鱼会在安静时段以外主动开个话题。')}${preference(data,value,'spontaneousChat','随心找我聊','让鱼用聊天模型决定什么时候开口、说什么。配合上方的主动聊天开关。')}${value.spontaneousChat?'':preference(data,value,'continueUnanswered','没回复也偶尔来聊','按原间隔和每天的次数来，安静时段休息。')}${preference(data,value,'dailyDiaryEnabled','晚上写日记','23 点交给聊天模型整理前一天收到的文字，在本机保存日记和记忆。用 /fish diary 查看。')}${connectionOptions(data,value)}<div class="card-actions">${button('保存设置','save-settings',{off:!desktop(data)||busy(data)})}</div></form>`;
   }
   function extensionCard(data, id) {
     const value = data.extensions?.[id];
@@ -259,6 +259,7 @@
     officialOwnerUMO:'官方私聊绑定',
     biliEnabled:'B站整合',
     proactiveEnabled:'主动聊天',
+    spontaneousChat:'随心找我聊',
     continueUnanswered:'没回复也偶尔来聊',
     dailyDiaryEnabled:'晚上写日记',
     defaultDelivery:'主动消息渠道',
@@ -271,7 +272,7 @@
     replyStyleCustomCleanup:'回复自定义清理',
   };
   const historyRestoreFields=new Set([
-    'officialOwnerUMO','dashboardPort','biliEnabled','proactiveEnabled','continueUnanswered','dailyDiaryEnabled',
+    'officialOwnerUMO','dashboardPort','biliEnabled','proactiveEnabled','spontaneousChat','continueUnanswered','dailyDiaryEnabled',
     'replyStyleMode','replyStyleMaxBubbles','replyStyleInterval','replyStylePunctuation',
     'replyStylePrompt','replyStyleCustomRegex','replyStyleCustomCleanup',
   ]);
@@ -499,7 +500,7 @@
     if(target.id==='app-update-channel'){updateChannel=target.value;return;}
 
     if(target.id.startsWith('pref-')){if(!preferencesDraft)preferencesDraft={...controller.get().workspace.preferences};preferencesDraft[target.id.slice(5)]=target.checked===true;preferencesDirty=true;return;}
-    if(!['dashboardPort','biliEnabled','proactiveEnabled','continueUnanswered','dailyDiaryEnabled','officialOwnerUMO'].includes(target.id))return;
+    if(!['dashboardPort','biliEnabled','proactiveEnabled','spontaneousChat','continueUnanswered','dailyDiaryEnabled','officialOwnerUMO'].includes(target.id))return;
     markDraft(target.id, target.type === 'checkbox' ? target.checked : target.value);
   }
   async function saveSettings() {

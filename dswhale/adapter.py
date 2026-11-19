@@ -7,7 +7,7 @@ import os
 import random
 import sqlite3
 import tempfile
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from weakref import WeakValueDictionary
@@ -26,6 +26,7 @@ from .host_config import (
     result_is_llm,
     stream_decoration_reason,
 )
+from .initiative import Initiative
 from .media import MediaError, MediaReader
 from .persona import AUTONOMOUS_PROMPT, CASUAL_CHAT, DEFAULT_PERSONA, untrusted_block
 from .qq_identity import is_official_c2c
@@ -55,6 +56,7 @@ class Companion:
         self.settings = settings
         self.store = store
         self.scheduler = Scheduler(settings, store)
+        self.initiative = Initiative(context, store)
         self.diary = DailyDiary(context, store)
         self.media = MediaReader(settings)
         # Discovery is optional: a malformed OpenBiliClaw address must degrade the
@@ -75,6 +77,7 @@ class Companion:
         self.health_task = None
         self.video_task = None
         self.diary_task = None
+        self.initiative_task = None
         self.workers = set()
         self.closed = False
         self.last_error = ""
@@ -215,6 +218,8 @@ class Companion:
             self.scheduler.human_received(
                 moment, scopes=[binding.umo for binding in self.settings.owner_bindings]
             )
+            if self.settings.proactive_enabled and self.settings.spontaneous_chat:
+                self.initiative.after_human(event.unified_msg_origin, moment)
             if self.settings.daily_diary_enabled:
                 try:
                     self.diary.record(
@@ -314,6 +319,12 @@ class Companion:
                 event.get_extra("dswhale_memory_snapshot", "尚未读取记忆，不要编造。"),
             )
         binding = self.binding_for(event)
+        if self.settings.spontaneous_chat and self.settings.proactive_enabled and binding:
+            thought = self.initiative.current_thought(self.initiative.state(binding.umo), now_utc())
+            if thought:
+                instructions += "\n角色当前的心情与念头，仅供自然接话时参考。\n" + untrusted_block(
+                    "character-state", json.dumps(thought, ensure_ascii=False)
+                )
         if self.settings.daily_diary_enabled and binding:
             try:
                 memories = self.diary.memories(binding.umo)
@@ -862,13 +873,14 @@ class Companion:
         delivery = self.settings.delivery_binding
         scopes = [binding.umo for binding in self.settings.owner_bindings]
         online = self.delivery_platform_ready(delivery) if delivery else False
-        activity = self.scheduler.reserve(
-            now,
-            scopes=scopes,
-            target_scope=delivery.umo if delivery else None,
-            online=online,
-        )
-        decision = self.scheduler.last_decision
+        activity = None
+        if self.settings.spontaneous_chat and delivery:
+            decision = self._consider_spontaneous(delivery, now, online)
+        else:
+            activity = self.scheduler.reserve(
+                now, scopes=scopes, target_scope=delivery.umo if delivery else None, online=online
+            )
+            decision = self.scheduler.last_decision
         if self._last_schedule_decision != decision:
             logger.info("DWhale proactive schedule: %s", decision)
             self._last_schedule_decision = decision
@@ -901,6 +913,59 @@ class Companion:
                     self._video_activity(video, delivery, now), "video-discovery"
                 )
 
+    def _consider_spontaneous(self, binding, now, online):
+        reason = self.scheduler.spontaneous_reason(now, binding.umo, online=online)
+        if reason != "ready":
+            return reason
+        if self.initiative_task and not self.initiative_task.done():
+            return "thinking"
+        if claim := self.initiative.claim(binding.umo, now):
+            self.initiative_task = self._background(
+                self._spontaneous_turn(binding, now, claim), "spontaneous-chat"
+            )
+            return "thinking"
+        return "waiting"
+
+    async def _spontaneous_turn(self, binding, now, claim):
+        scope = binding.umo
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        try:
+            memories = self.diary.memories(scope) if self.settings.daily_diary_enabled else []
+            decision = await self.initiative.decide(
+                scope,
+                self.settings.local_time(now),
+                self.settings,
+                self.store.state(scope),
+                memories,
+            )
+        except Exception as error:
+            logger.warning("DWhale spontaneous chat: %s", type(error).__name__)
+            decision = None
+        at = now + timedelta(seconds=int(loop.time() - started))
+        if self.closed:
+            return
+        offer = (
+            decision is not None
+            and decision.action == "send"
+            and self.scheduler.spontaneous_reason(
+                at, scope, online=self.delivery_platform_ready(binding)
+            )
+            == "ready"
+        )
+        draft = self.initiative.finish(scope, claim, at, decision, offer=offer)
+        if draft:
+            activity = self.scheduler.reserve(
+                at,
+                target_scope=scope,
+                online=self.delivery_platform_ready(binding),
+                spontaneous_since=now.timestamp(),
+            )
+            if activity:
+                await self._queue_activity(
+                    activity, binding, "DSWhale 内部主动开场", at, draft=draft
+                )
+
     async def _video_activity(self, activity, delivery, now):
         try:
             prompt = await self._discover_video(now, delivery.umo)
@@ -916,7 +981,7 @@ class Companion:
         else:
             self.store.transition(activity.id, "failed", now.timestamp(), "无可分享的视频")
 
-    async def _queue_activity(self, activity, delivery, prompt, now):
+    async def _queue_activity(self, activity, delivery, prompt, now, *, draft=None):
         try:
             state = self.store.state(delivery.umo)
             if state["paused"] or state["last_human"] > activity.created:
@@ -926,6 +991,8 @@ class Companion:
             event.is_wake = True
             event.is_at_or_wake_command = True
             event.set_extra("dswhale_activity_id", activity.id)
+            if draft is not None:
+                event.set_extra("dswhale_spontaneous_draft", draft)
             self.pending[activity.id] = event
             self._guard_transport(event)
             if not self.store.transition(activity.id, "queued", now.timestamp()):
@@ -1058,6 +1125,20 @@ class Companion:
             if self.settings.proactive_continue_unanswered
             else f"{state['unanswered']}/{self.settings.unanswered_limit}"
         )
+        chat_count = f"{daily}/{self.settings.daily_limit}"
+        initiative_status = ""
+        if self.settings.spontaneous_chat:
+            chat_count = str(daily)
+            unanswered = str(state["unanswered"]) + " 次"
+            snapshot = self.initiative.state(scope)
+            if snapshot and next_chat.startswith("随心找我聊"):
+                if self.initiative_task and not self.initiative_task.done():
+                    next_chat = "随心找我聊，正在想要不要开口"
+                elif snapshot["outcome"] == "unavailable":
+                    next_chat = "随心找我聊，模型暂未给出有效决定"
+                thought = self.initiative.current_thought(snapshot, now)
+                if thought.get("mood"):
+                    initiative_status = f"最近心情：{thought['mood']}\n"
         discovery = {
             "off": "未启用",
             "unchecked": "等待独立的视频时段",
@@ -1069,7 +1150,7 @@ class Companion:
         diary = "已开启，23:00 整理前一天" if self.settings.daily_diary_enabled else "未开启"
         return (
             f"DWhale {__version__}\n主动聊天：{next_chat}\n"
-            f"今日主动聊天：{daily}/{self.settings.daily_limit}\n"
+            f"今日主动聊天：{chat_count}\n{initiative_status}"
             f"连续未回复：{unanswered}\n最近活动：{latest}\n"
             f"长期记忆插件：{'已加载，请用 /lmem status 检查配置' if memory else '未加载 LivingMemory'}\n"
             f"今日自动视频活动：{videos}/1\nOpenBiliClaw：{discovery}\n每日回顾：{diary}\n"

@@ -56,7 +56,7 @@ class Scheduler:
             return "offline"
         return None
 
-    def _decision(self, now, scopes, *, kind, db=None):
+    def _decision(self, now, scopes, *, kind, db=None, spontaneous=False):
         cfg = self.settings
         states = [self.store.state(scope) for scope in scopes]
         if any(state["paused"] for state in states):
@@ -66,12 +66,15 @@ class Scheduler:
         chat = kind == "chat"
         if (
             chat
+            and not spontaneous
             and not cfg.proactive_continue_unanswered
             and max(state["unanswered"] for state in states) >= cfg.unanswered_limit
         ):
             return "awaiting_reply", None
         if self.store.has_pending(scopes, db=db, kinds=CHAT_KINDS if chat else VIDEO_KINDS):
             return "pending", None
+        if spontaneous:
+            return "ready", None
         local = cfg.local_time(now)
         if kind == "video-discovery" and not 18 <= local.hour < 23:
             return "waiting", None
@@ -93,11 +96,21 @@ class Scheduler:
             return "unscheduled", None
         return ("waiting" if now.timestamp() < due else "ready"), due
 
+    def spontaneous_reason(self, now, scope, *, online):
+        return (
+            self._availability(online)
+            or self._decision(now, self._scopes((scope,)), kind="chat", spontaneous=True)[0]
+        )
+
     def status(self, now: datetime, scope: str, *, online: bool) -> str:
         reason = self._availability(online)
         due = None
         if reason is None:
-            reason, due = self._decision(now, self._scopes((scope,)), kind="chat")
+            reason, due = self._decision(
+                now, self._scopes((scope,)), kind="chat", spontaneous=self.settings.spontaneous_chat
+            )
+        if self.settings.spontaneous_chat and reason == "ready":
+            return "随心找我聊，由鱼决定开口时机"
         if reason == "waiting":
             next_chat = self.settings.local_time(datetime.fromtimestamp(due, tz=now.tzinfo))
             return f"预计 {next_chat:%m-%d %H:%M} 后找你聊"
@@ -122,10 +135,14 @@ class Scheduler:
         scopes=None,
         target_scope=None,
         online=True,
+        spontaneous_since=None,
     ) -> Activity | None:
         if external_kind is not None and external_kind not in VIDEO_KINDS:
             raise ValueError("Unknown activity kind")
         kind = external_kind or "chat"
+        spontaneous = spontaneous_since is not None
+        if kind == "chat" and spontaneous != self.settings.spontaneous_chat:
+            return None
         if reason := self._availability(online, kind):
             if external_kind is None:
                 self.last_decision = reason
@@ -138,7 +155,14 @@ class Scheduler:
             scopes = (target, *scopes)
         ts = now.timestamp()
         with self.store.transaction() as db:
-            reason, _ = self._decision(now, scopes, kind=kind, db=db)
+            if spontaneous and (
+                kind != "chat"
+                or any(
+                    self.store.state(scope)["last_human"] > spontaneous_since for scope in scopes
+                )
+            ):
+                return None
+            reason, _ = self._decision(now, scopes, kind=kind, db=db, spontaneous=spontaneous)
             if external_kind is None:
                 self.last_decision = reason
             if reason == "unscheduled":
@@ -159,7 +183,7 @@ class Scheduler:
                 "INSERT INTO activities VALUES(?,?,?,?,?,?,?,?)",
                 (item.id, scope, item.kind, local.date().isoformat(), item.status, ts, ts, ""),
             )
-            if kind == "chat":
+            if kind == "chat" and not spontaneous:
                 scheduled = self._next_due(now)
                 for target in scopes:
                     db.execute(

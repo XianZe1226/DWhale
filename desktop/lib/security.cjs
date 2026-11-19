@@ -5,7 +5,7 @@ for (const action of ['appearance-get', 'appearance-save', 'open-release-page'])
 const PANELS = new Set(['astrbot', 'models', 'memory', 'bilibili', 'qq',  'persona']);
 const WORKSPACE_ACTIONS = new Set(['workspace-status','health-check','backup-list','backup-restore','backup-delete','diagnostics-export','app-update-check','app-update-start','app-update-download','app-update-install','app-update-rollback','preferences-save']);
 for (const action of WORKSPACE_ACTIONS) ACTIONS.add(action);
-const SETTINGS_FIELDS = new Set(['qqConnectionMode','officialOwnerUMO','defaultDelivery','dashboardPort','biliEnabled','proactiveEnabled','continueUnanswered','dailyDiaryEnabled','replyStyleMode','replyStyleMaxBubbles','replyStyleInterval','replyStylePunctuation','replyStylePrompt','replyStyleCustomRegex','replyStyleCustomCleanup']);
+const SETTINGS_FIELDS = new Set(['qqConnectionMode','officialOwnerUMO','defaultDelivery','dashboardPort','biliEnabled','proactiveEnabled','spontaneousChat','continueUnanswered','dailyDiaryEnabled','replyStyleMode','replyStyleMaxBubbles','replyStyleInterval','replyStylePunctuation','replyStylePrompt','replyStyleCustomRegex','replyStyleCustomCleanup']);
 function validateSettings(payload) {
   // Accept the revisioned envelope from this renderer and the legacy bare patch
   // from older CLI callers; every field must still be allowlisted.

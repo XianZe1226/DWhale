@@ -48,6 +48,12 @@ class Store:
                 scope TEXT NOT NULL, url TEXT NOT NULL, created REAL NOT NULL,
                 PRIMARY KEY(scope, url)
             );
+            CREATE TABLE IF NOT EXISTS initiative (
+                scope TEXT PRIMARY KEY, next_check REAL NOT NULL,
+                mood TEXT NOT NULL DEFAULT '', thought TEXT NOT NULL DEFAULT '',
+                updated REAL NOT NULL DEFAULT 0, recent TEXT NOT NULL DEFAULT '[]',
+                outcome TEXT NOT NULL DEFAULT ''
+            );
         """)
         self._prepare_submission_ledger()
 

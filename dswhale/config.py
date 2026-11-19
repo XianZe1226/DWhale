@@ -18,6 +18,7 @@ class Settings:
     qq_default_delivery: str = "official"
     config_migration_version: int = 0
     proactive_enabled: bool = False
+    spontaneous_chat: bool = False
     proactive_continue_unanswered: bool = False
     daily_diary_enabled: bool = False
     timezone: str = "Asia/Shanghai"

@@ -30,6 +30,7 @@ FIELDS = {
     "dashboardPort",
     "biliEnabled",
     "proactiveEnabled",
+    "spontaneousChat",
     "continueUnanswered",
     "dailyDiaryEnabled",
     "defaultDelivery",
@@ -89,6 +90,7 @@ def read_settings(host):
         "onebotToken": "",
         "biliEnabled": bool(fish.get("bili_enabled", False)),
         "proactiveEnabled": bool(fish.get("proactive_enabled", False)),
+        "spontaneousChat": bool(fish.get("spontaneous_chat", False)),
         "continueUnanswered": bool(fish.get("proactive_continue_unanswered", False)),
         "dailyDiaryEnabled": bool(fish.get("daily_diary_enabled", False)),
         "signatureEnabled": False,
@@ -327,7 +329,7 @@ def _validated_patch(patch):
         if key == "dashboardPort":
             if isinstance(value, bool) or not isinstance(value, int):
                 raise ValueError("端口需要为 1024–65535 的整数")
-        elif key in SWITCH_FIELDS | {"continueUnanswered", "replyStylePrompt"}:
+        elif key in SWITCH_FIELDS | {"continueUnanswered", "replyStylePrompt", "spontaneousChat"}:
             if not isinstance(value, bool):
                 raise ValueError("开关值无效")
         elif key == "replyStyleMaxBubbles":
@@ -607,6 +609,7 @@ def save_settings(host, patch, expected_revision=None):
             for key, fish_key in (
                 ("biliEnabled", "bili_enabled"),
                 ("proactiveEnabled", "proactive_enabled"),
+                ("spontaneousChat", "spontaneous_chat"),
                 ("continueUnanswered", "proactive_continue_unanswered"),
                 ("dailyDiaryEnabled", "daily_diary_enabled"),
             ):

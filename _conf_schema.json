@@ -41,6 +41,12 @@
     "default": false,
     "hint": "仍遵守主动聊天间隔、每日次数和免打扰时段。"
   },
+  "spontaneous_chat": {
+    "description": "随心找我聊",
+    "type": "bool",
+    "default": false,
+    "hint": "开启主动聊天后，用当前聊天模型结合近况、记忆和心情决定要不要开口。仍遵守免打扰与官方 QQ 发送规则。"
+  },
   "daily_diary_enabled": {
     "description": "晚上 11 点整理前一天的日记",
     "type": "bool",
