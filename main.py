@@ -109,6 +109,25 @@ class DSWhale(Star):
         # split protocol tags across frames and can double-clean content.
         if event.get_extra("_dswhale_stream_owned"):
             return
+        result = event.get_result()
+        if (
+            result
+            and event.get_extra("dswhale_transport_guarded")
+            and self.companion.internal_id(event)
+        ):
+            result.use_t2i_ = False
+            if (
+                result.is_llm_result()
+                and result.chain
+                and any(not isinstance(part, Plain) for part in result.chain)
+            ):
+                plain = [
+                    part for part in result.chain if isinstance(part, Plain) and part.text.strip()
+                ]
+                fallback = event.get_extra("dswhale_proactive_text")
+                if not plain and isinstance(fallback, str) and fallback.strip():
+                    plain = [Plain(fallback)]
+                result.chain = plain
         if await self.companion.deliver_reply_style(event):
             return
         result = event.get_result()

@@ -366,6 +366,10 @@ class Companion:
         the host sends it. DSWhale can only own plain bubbles, so any of those
         decorations must keep the host's ownership instead of being dropped.
         """
+        if event.get_extra("dswhale_transport_guarded") and self.internal_id(event):
+            # Scheduled replies use the text planner even when ordinary replies
+            # have host speech or image decoration enabled.
+            return ""
         context = getattr(self, "context", None)
         if context is None:
             return ""
@@ -705,16 +709,10 @@ class Companion:
                 return False
             activity_id = self.internal_id(event)
             if activity_id and any(not isinstance(part, Plain) for part in message.chain):
-                # Scheduled openers use text. If the host replaced the generated
-                # text with TTS or an image, use the cleaned model text instead.
-                plain = [
-                    part for part in message.chain if isinstance(part, Plain) and part.text.strip()
-                ]
-                if not plain:
-                    fallback = event.get_extra("dswhale_proactive_text")
-                    if isinstance(fallback, str) and fallback.strip():
-                        plain = [Plain(fallback)]
-                message = message.derive(plain)
+                # Never turn each host media segment into another full reply.
+                message = message.derive(
+                    [part for part in message.chain if isinstance(part, Plain)]
+                )
             # Empty/whitespace-only chains are never submitted as messages.
             # A successful no-op return is not evidence of platform delivery.
             if not any(not isinstance(part, Plain) or part.text.strip() for part in message.chain):

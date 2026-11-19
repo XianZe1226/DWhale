@@ -899,8 +899,10 @@ async def test_proactive_event_removes_the_direct_send_tool_from_its_own_request
 async def test_proactive_media_decoration_sends_clean_text_or_spends_no_unanswered(
     companion, monkeypatch
 ):
-    from astrbot.api.event import MessageChain
-    from astrbot.api.message_components import Image
+    from unittest.mock import AsyncMock
+
+    from astrbot.api.event import MessageChain, ResultContentType
+    from astrbot.api.message_components import Image, Record
 
     import main
 
@@ -914,6 +916,14 @@ async def test_proactive_media_decoration_sends_clean_text_or_spends_no_unanswer
     assert companion.store.state(SCOPE)["unanswered"] == 0
     plugin = object.__new__(main.DSWhale)
     plugin.companion = companion
+    companion.context.send_message = AsyncMock(return_value=True)
     await plugin.clean_response(queued, SimpleNamespace(completion_text="合成文字开场"))
-    assert await queued.send(image_only) is True
+    queued.set_result(
+        queued.chain_result([Image(file="")]).set_result_content_type(ResultContentType.LLM_RESULT)
+    )
+    await plugin.before_send(queued)
+    assert await queued.send(MessageChain([Record(file="", text="第一段")])) is False
+    assert await queued.send(MessageChain([Record(file="", text="第二段")])) is False
+    assert companion.context.send_message.await_count == 1
+    assert companion.context.send_message.await_args.args[1].get_plain_text() == "合成文字开场"
     assert companion.store.state(SCOPE)["unanswered"] == 1
