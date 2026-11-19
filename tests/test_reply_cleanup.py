@@ -58,6 +58,7 @@ async def test_sdk_hooks_clean_before_memory_and_outgoing_while_preserving_other
 
     plugin.companion = SimpleNamespace(
         authorized=lambda event: event.owner,
+        internal_id=lambda event: None,
         allow_delivery=lambda event: True,
         deliver_reply_style=no_style,
         settings=SimpleNamespace(reply_style_mode="inherit"),
