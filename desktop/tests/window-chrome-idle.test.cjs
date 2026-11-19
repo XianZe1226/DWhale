@@ -14,6 +14,7 @@ function mainHarness({ openWindow = false, dark = true, userData } = {}) {
   const file = path.resolve(__dirname, '../main.cjs');
   const native = createRequire(file);
   const messages = [];
+  const externalURLs = [];
   let capturedOptions;
   let healthReads = 0;
   const clock = fakeClock();
@@ -34,6 +35,7 @@ function mainHarness({ openWindow = false, dark = true, userData } = {}) {
   const electron = {
     app: { setName() {}, setAppUserModelId() {}, setPath() {}, getPath: name => userData ? name === 'userData' ? userData : path.join(userData, name) : path.join(require('node:os').tmpdir(), 'dwhale-synthetic-window', name), getVersion: () => '0.4.0-alpha.2', requestSingleInstanceLock: () => false, quit() {} },
     protocol: { registerSchemesAsPrivileged() {} },
+    shell: { openExternal: async url => { externalURLs.push(url); } },
     powerMonitor, ipcMain: { handle(channel, callback) { ipcHandlers.set(channel, callback); } },
     nativeTheme: { shouldUseDarkColors: dark },
     session: {
@@ -89,7 +91,7 @@ function mainHarness({ openWindow = false, dark = true, userData } = {}) {
       return { contextBridge: { exposeInMainWorld(name, value) { assert.equal(name, 'dswhale'); bridge = value; } }, ipcRenderer };
     },
   });
-  return { ...context.hooks, bridge, request, nativeWindow, messages, handlers, clock, powerMonitor, healthReads: () => healthReads, options: () => capturedOptions };
+  return { ...context.hooks, bridge, request, nativeWindow, messages, externalURLs, handlers, clock, powerMonitor, healthReads: () => healthReads, options: () => capturedOptions };
 }
 
 test('transparent native Windows controls use theme glyphs and reserve their content area', () => {
@@ -446,4 +448,16 @@ test('an actual persistence failure clears locally after a successful IPC save',
   assert.equal(controller.get().appearance.material, 'liquid');
   assert.equal(controller.get().appearanceError, '');
   assert.equal(JSON.parse(fs.readFileSync(file, 'utf8')).material, 'liquid');
+});
+
+test('opening the releases page uses the registered IPC and always goes to the fixed official URL', async () => {
+  const h = mainHarness({ openWindow: true });
+  await h.createWindow();
+  try {
+    await h.bridge.invoke('open-release-page');
+    await assert.rejects(h.bridge.invoke('open-release-page', { url: 'https://synthetic.invalid/' }));
+    assert.deepEqual(h.externalURLs, ['https://github.com/XianZe1226/DWhale/releases']);
+  } finally {
+    h.disposeMonitoring();
+  }
 });

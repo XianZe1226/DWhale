@@ -31,12 +31,14 @@ def test_restart_preserves_unanswered_budget_and_human_resets_it(tmp_path):
         first = scheduler.reserve(NOW + timedelta(hours=2))
         assert first is not None
         store.transition(first.id, "queued", NOW.timestamp())
+        assert store.mark_submission(first.id)
         store.transition(first.id, "sent", NOW.timestamp())
     with Store(path) as store:
         scheduler = Scheduler(settings(), store)
         second = scheduler.reserve(NOW + timedelta(hours=4))
         assert second is not None
         store.transition(second.id, "queued", (NOW + timedelta(hours=4)).timestamp())
+        assert store.mark_submission(second.id)
         store.transition(second.id, "sent", (NOW + timedelta(hours=4)).timestamp())
         assert scheduler.reserve(NOW + timedelta(hours=6)) is None
         scheduler.human_received(NOW + timedelta(hours=6))
@@ -118,7 +120,7 @@ def test_activity_does_not_count_as_human_and_failure_is_not_sent(tmp_path):
         store.transition(item.id, "failed", NOW.timestamp(), "provider unavailable")
         assert store.activity(item.id).status == "failed"
         assert not store.transition(item.id, "sent", NOW.timestamp())
-        assert store.state(SCOPE)["unanswered"] == 1
+        assert store.state(SCOPE)["unanswered"] == 0
 
 
 def test_bili_share_uses_same_quiet_daily_and_unanswered_budget(tmp_path):
@@ -157,3 +159,27 @@ def test_proactive_status_explains_schedule_and_respects_pause(tmp_path):
         store.set_paused(SCOPE, True)
         assert "/fish start" in scheduler.status(NOW, SCOPE, online=True)
         assert scheduler.reserve(NOW + timedelta(hours=3)) is None
+
+
+def test_upgrade_keeps_existing_unanswered_count_and_only_charges_new_submission_once(tmp_path):
+    path = tmp_path / "a5-state.db"
+    with Store(path) as previous:
+        previous.db.execute("DROP TABLE submitted_activities")
+        previous.state(SCOPE)
+        previous.db.execute(
+            "UPDATE sessions SET unanswered=1,next_due=? WHERE scope=?", (NOW.timestamp(), SCOPE)
+        )
+    with Store(path) as current:
+        scheduler = Scheduler(settings(), current)
+        pending = scheduler.reserve(NOW)
+        assert pending
+        assert current.state(SCOPE)["unanswered"] == 1
+        assert current.transition(pending.id, "queued", NOW.timestamp())
+        assert current.mark_submission(pending.id)
+        assert current.mark_submission(pending.id)
+        assert current.state(SCOPE)["unanswered"] == 2
+    with Store(path) as current:
+        current.recover_pending(NOW.timestamp() + 30)
+        assert current.activity(pending.id).status == "uncertain"
+        assert current.state(SCOPE)["unanswered"] == 2
+        assert not current.mark_submission(pending.id)

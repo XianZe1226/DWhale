@@ -1074,3 +1074,11 @@ test('overview uses the initial official setup summary before loading private se
   assert.doesNotMatch(app.html(), /等待完成配置/);
   assert.equal(app.calls.some(([action]) => action === 'settings-get'), false);
 });
+
+test('update options open the fixed official release page through an argument-free action', async () => {
+  const app = renderApp({ screen: 'settings' });
+  await app.settle();
+  assert.match(app.html(), /打开官方发布页/);
+  await app.click('open-release-page');
+  assert.deepEqual(app.calls.find(([action]) => action === 'open-release-page'), ['open-release-page', undefined]);
+});

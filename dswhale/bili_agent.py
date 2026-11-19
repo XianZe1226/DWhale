@@ -149,16 +149,20 @@ async def share_qq(service, text, bvid="", reason="", score=0, rank=1):
             raise RuntimeError("主人已发来新消息或暂停")
         from .qq_transport import send_owner_text
 
-        c.store.transition(activity.id, "queued", now.timestamp())
+        if not c.delivery_platform_ready(binding):
+            c.store.settle_unconfirmed(activity.id, datetime.now(UTC).timestamp(), "QQ 已离线")
+            return "当前 QQ 连接未在线，没有发送。"
+        if not c.store.transition(
+            activity.id, "queued", now.timestamp()
+        ) or not c.store.mark_submission(activity.id):
+            return "发起的分享已结束，没有发送。"
         confirmed = await send_owner_text(c, text, binding)
         c.store.transition(
             activity.id, "sent" if confirmed else "uncertain", datetime.now(UTC).timestamp()
         )
         return "已提交给绑定的主人 QQ；不代表已读。"
     except BaseException:
-        c.store.transition(
-            activity.id, "uncertain", datetime.now(UTC).timestamp(), "B站推荐投递未确认"
-        )
+        c.store.settle_unconfirmed(activity.id, datetime.now(UTC).timestamp(), "B站推荐投递未确认")
         raise
 
 

@@ -11,6 +11,7 @@ from .store import Activity, Store
 class Scheduler:
     def __init__(self, settings: Settings, store: Store):
         self.settings, self.store = settings, store
+        self.last_decision = None
 
     def _next_due(self, now: datetime) -> float:
         return now.timestamp() + 60 * random.randint(
@@ -42,30 +43,58 @@ class Scheduler:
                 (now.timestamp(), due, scope),
             )
 
-    def status(self, now: datetime, scope: str, *, online: bool) -> str:
+    def _availability(self, online: bool):
         if not self.settings.proactive_enabled:
-            return "未开启，可在 QQ 连接页开启「主动找你聊」"
-        state = self.store.state(scope)
-        if state["paused"]:
-            return "已暂停，发送 /fish start 恢复"
+            return "disabled"
+        if not self.settings.owner_scope:
+            return "unbound"
         if not online:
-            return "等待 QQ 官方连接恢复"
-        if self.settings.is_quiet(now):
-            return f"安静时段，{self.settings.quiet_end} 后再考虑开场"
-        if state["unanswered"] >= self.settings.unanswered_limit:
-            return "等你先聊一句"
-        local_day = self.settings.local_time(now).date().isoformat()
-        if self.store.count_local_day((scope,), local_day) >= self.settings.daily_limit:
-            return "今天的主动活动次数已用完"
-        if self.store.has_pending((scope,)):
-            return "正在准备一条消息"
-        due = state["next_due"]
+            return "offline"
+        return None
+
+    def _decision(self, now, scopes, *, external, db=None):
+        cfg = self.settings
+        states = [self.store.state(scope) for scope in scopes]
+        if any(state["paused"] for state in states):
+            return "paused", None
+        if cfg.is_quiet(now):
+            return "quiet", None
+        if max(state["unanswered"] for state in states) >= cfg.unanswered_limit:
+            return "awaiting_reply", None
+        if self.store.has_pending(scopes, db=db):
+            return "pending", None
+        local_day = cfg.local_time(now).date().isoformat()
+        if self.store.count_local_day(scopes, local_day, db=db) >= cfg.daily_limit:
+            return "daily_limit", None
+        if external:
+            return "ready", None
+        due = max(
+            (state["next_due"] for state in states if state["next_due"] is not None), default=None
+        )
         if due is None:
-            return "正在安排下次开场"
-        if due <= now.timestamp():
-            return "已到开场时间，等待下一次检查"
-        next_chat = self.settings.local_time(datetime.fromtimestamp(due, tz=now.tzinfo))
-        return f"预计 {next_chat:%m-%d %H:%M} 后找你聊"
+            return "unscheduled", None
+        return ("waiting" if now.timestamp() < due else "ready"), due
+
+    def status(self, now: datetime, scope: str, *, online: bool) -> str:
+        reason = self._availability(online)
+        due = None
+        if reason is None:
+            reason, due = self._decision(now, self._scopes((scope,)), external=False)
+        if reason == "waiting":
+            next_chat = self.settings.local_time(datetime.fromtimestamp(due, tz=now.tzinfo))
+            return f"预计 {next_chat:%m-%d %H:%M} 后找你聊"
+        return {
+            "disabled": "未开启，可在 QQ 连接页开启「主动找你聊」",
+            "unbound": "未绑定官方私聊",
+            "offline": "等待 QQ 官方连接恢复",
+            "paused": "已暂停，发送 /fish start 恢复",
+            "quiet": f"安静时段，{self.settings.quiet_end} 后再考虑开场",
+            "awaiting_reply": "等你先聊一句",
+            "daily_limit": "今天的主动活动次数已用完",
+            "pending": "正在准备一条消息",
+            "unscheduled": "正在安排下次开场",
+            "ready": "已到开场时间，等待下一次检查",
+        }[reason]
 
     def reserve(
         self,
@@ -74,38 +103,30 @@ class Scheduler:
         external_kind: str | None = None,
         scopes=None,
         target_scope=None,
+        online=True,
     ) -> Activity | None:
         if external_kind not in {None, "bili-share", "bili-note", "bili-watch"}:
             raise ValueError("Unknown activity kind")
+        if reason := self._availability(online):
+            if external_kind is None:
+                self.last_decision = reason
+            return None
         cfg = self.settings
         local = cfg.local_time(now)
-        if not cfg.proactive_enabled or not cfg.owner_scope or cfg.is_quiet(now):
-            return None
         scopes = self._scopes(scopes)
         target = str(target_scope or scopes[0])
         if target not in scopes:
             scopes = (target, *scopes)
         ts = now.timestamp()
         with self.store.transaction() as db:
-            states = [self.store.state(scope) for scope in scopes]
-            if any(state["paused"] for state in states):
-                return None
-            if max(state["unanswered"] for state in states) >= cfg.unanswered_limit:
-                return None
-            dues = [state["next_due"] for state in states]
-            if all(due is None for due in dues) and external_kind is None:
+            reason, _ = self._decision(now, scopes, external=external_kind is not None, db=db)
+            if external_kind is None:
+                self.last_decision = reason
+            if reason == "unscheduled":
                 scheduled = self._next_due(now)
                 for scope in scopes:
                     db.execute("UPDATE sessions SET next_due=? WHERE scope=?", (scheduled, scope))
-                return None
-            if external_kind is None and ts < max(due for due in dues if due is not None):
-                return None
-            if self.store.has_pending(scopes, db=db):
-                return None
-            if (
-                self.store.count_local_day(scopes, local.date().isoformat(), db=db)
-                >= cfg.daily_limit
-            ):
+            if reason != "ready":
                 return None
             scope = target
             item = Activity(
@@ -122,7 +143,7 @@ class Scheduler:
             scheduled = self._next_due(now)
             for target in scopes:
                 db.execute(
-                    "UPDATE sessions SET next_due=?,unanswered=unanswered+1 WHERE scope=?",
+                    "UPDATE sessions SET next_due=? WHERE scope=?",
                     (scheduled, target),
                 )
             return item

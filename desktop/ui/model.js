@@ -10,8 +10,8 @@
   // in-place warning and must never look like a failed user operation (the old
   // APP-001 red banner) or block an unrelated save.
   const readWarningActions = new Set(['inspect','workspace-status']);
-  const noPayloadActions = new Set(['app-update-start','settings-history','connections-status','workspace-status','health-check','backup-list','diagnostics-export','app-update-download','app-update-install','appearance-get']);
-  const actions = new Set(['inspect', 'install', 'start', 'stop', 'open-panel', 'home', 'settings-get', 'settings-save', 'open-data', 'backup', 'restore', 'initial-login', 'extensions-status', 'extension-check', 'extension-update', 'extension-rollback','connections-status','settings-history','settings-restore-field','reply-style-preview','appearance-get','appearance-save',...workspaceActions]);
+  const noPayloadActions = new Set(['app-update-start','settings-history','connections-status','workspace-status','health-check','backup-list','diagnostics-export','app-update-download','app-update-install','appearance-get','open-release-page']);
+  const actions = new Set(['inspect', 'install', 'start', 'stop', 'open-panel', 'home', 'settings-get', 'settings-save', 'open-data', 'backup', 'restore', 'initial-login', 'extensions-status', 'extension-check', 'extension-update', 'extension-rollback','connections-status','settings-history','settings-restore-field','reply-style-preview','appearance-get','appearance-save','open-release-page',...workspaceActions]);
   const panels = new Set(['astrbot', 'models', 'memory', 'bilibili', 'qq',  'persona']);
   const extensionIds = new Set(['memory', 'memes']);
   const extensionActions = new Set(['extension-check', 'extension-update', 'extension-rollback']);
@@ -234,7 +234,7 @@
       data.state = { ...data.state, ...state, platform: { ...data.state.platform, ...state.platform }, setup: { ...data.state.setup, ...state.setup } };
     }
     if (!available && preview) {
-      merge({ version: '0.4.0a5', platform: { id: 'darwin-arm64', label: 'macOS · Apple Silicon', supported: true }, components: [
+      merge({ version: '0.4.0a6', platform: { id: 'darwin-arm64', label: 'macOS · Apple Silicon', supported: true }, components: [
         { id: 'python', label: 'Python', version: '3.12', status: 'missing', detail: '将安装到独立环境' },
         { id: 'node', label: 'Node.js', version: '22 LTS', status: 'missing', detail: '用于扩展与网页能力' },
         { id: 'ffmpeg', label: 'FFmpeg', version: '6+', status: 'missing', detail: '音频与视频处理' },

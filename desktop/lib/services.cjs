@@ -44,7 +44,9 @@ function normalizeConnectionHealth(value, options = {}) {
     const state = !options.running || !bound ? 'unknown' : protocolConnected ? 'connected' : !platformReady ? 'offline' : entry.gatewayBlocked === true ? 'blocked' : 'connecting';
     channels[channel] = { bound, platformReady, protocolConnected, state };
   }
-  return { format: 2, updatedAt: value.updatedAt, channels };
+  const videoDiscovery = options.running && ['invalid', 'unavailable', 'video-error'].includes(value.videoDiscovery)
+    ? value.videoDiscovery : undefined;
+  return { format: 2, updatedAt: value.updatedAt, channels, ...(videoDiscovery ? { videoDiscovery } : {}) };
 }
 async function readConnectionHealth(options) {
   if (!options?.running) return unknownConnectionHealth();

@@ -35,7 +35,7 @@ const MESSAGES = {
   MANIFEST_INVALID:'更新清单内容不符合要求，请等待官方修复。',
   MANIFEST_TOO_LARGE:'更新清单超过安全大小限制。',
   METADATA_TOO_LARGE:'发布信息超过安全大小限制。',
-  NETWORK_FAILED:'无法获取官方更新，请检查网络后重试。',
+  NETWORK_FAILED:'无法获取官方更新。可在「更新选项」打开官方发布页手动下载安装包。',
   CHANNEL_INVALID:'请选择稳定版或 Alpha 更新通道。',
   DOWNGRADE_BLOCKED:'此版本低于当前版本或已验证版本，请使用明确的回退操作。',
   PLATFORM_UNSUPPORTED:'支持 Windows 10 22H2+/11 x64、macOS 13+ Apple Silicon、Ubuntu 22.04/24.04 x64。',

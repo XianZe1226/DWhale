@@ -131,7 +131,7 @@ def companion(tmp_path):
     c.store.close()
 
 
-async def test_scheduled_event_uses_real_adapter_same_owner_queue_and_hooks(companion):
+async def test_scheduled_event_uses_real_adapter_same_owner_queue_and_hooks(companion, monkeypatch):
     c = companion
     await c.tick(NOW)
     await c.tick(NOW + timedelta(hours=2))
@@ -141,12 +141,15 @@ async def test_scheduled_event_uses_real_adapter_same_owner_queue_and_hooks(comp
     assert synthetic.is_wake and synthetic.is_at_or_wake_command
     assert synthetic.get_self_id() == "unknown_selfid"
     c.observe(synthetic, NOW + timedelta(hours=2))
-    assert c.store.state(SCOPE)["unanswered"] == 1
+    assert c.store.state(SCOPE)["unanswered"] == 0
     req = ProviderRequest(prompt="existing", system_prompt="HOST MEMORY INJECTION")
     c.enrich(synthetic, req)
     assert "HOST MEMORY INJECTION" in req.system_prompt
     assert "自主活动" in req.system_prompt
     assert req.prompt == "existing"
+    monkeypatch.setattr("dswhale.adapter.now_utc", lambda: NOW + timedelta(hours=2))
+    assert await synthetic.send(synthetic.plain_result("合成回复")) is True
+    assert c.store.state(SCOPE)["unanswered"] == 1
     c.delivered(synthetic, NOW + timedelta(hours=2))
     assert c.store.recent_activities(SCOPE)[0]["status"] == "uncertain"
     human = event(c.context)
@@ -219,12 +222,13 @@ def test_schema_matches_validated_defaults():
     }
 
 
-async def test_completion_hook_without_transport_success_is_uncertain(companion):
+async def test_completion_hook_without_submission_spends_no_unanswered_budget(companion):
     await companion.tick(NOW)
     await companion.tick(NOW + timedelta(hours=2))
     synthetic = await companion.context.queue.get()
     companion.delivered(synthetic, NOW + timedelta(hours=2))
-    assert companion.store.recent_activities(SCOPE)[0]["status"] == "uncertain"
+    assert companion.store.recent_activities(SCOPE)[0]["status"] == "failed"
+    assert companion.store.state(SCOPE)["unanswered"] == 0
 
 
 async def test_synthetic_memory_hooks_excluded_without_changing_human(companion):
@@ -592,8 +596,8 @@ def test_untrusted_block_encodes_reserved_markup_and_label(label):
     ("enabled", "url", "expected"),
     [
         (False, "https://example.invalid", "未启用"),
-        (True, "https://example.invalid", "已启用"),
-        (True, "bad-private-address-secret", "不可用"),
+        (True, "https://example.invalid", "等待下次活动检查"),
+        (True, "bad-private-address-secret", "地址无效"),
     ],
 )
 def test_discovery_status_reports_effective_availability(tmp_path, enabled, url, expected):
@@ -710,18 +714,18 @@ async def test_tick_waits_without_burning_budget_when_default_platform_is_unavai
     c.context.get_platform_inst = lambda ident: None
     await c.tick(NOW)
     assert_no_activity()
-    # Loaded platform but the OneBot client is offline.
+    # Loaded platform but the QQ gateway is offline.
     c.context.get_platform_inst = original_platform
     connected = c.context.client._active_websockets
     c.context.client._active_websockets = {}
     await c.tick(NOW)
     assert_no_activity()
-    # Reconnected: one activity can be claimed, and it consumes the budget.
+    # After reconnect one reservation consumes only the daily budget.
     c.context.client._active_websockets = connected
     await c.tick(NOW)
     assert len(c.store.recent_activities(scope)) == 1
     assert c.store.count_local_day([scope], local_day) == 1
-    assert c.store.state(scope)["unanswered"] == 1
+    assert c.store.state(scope)["unanswered"] == 0
 
 
 async def test_offline_default_platform_still_expires_old_claims(companion):
@@ -768,3 +772,90 @@ def test_fish_status_command_does_not_postpone_next_chat(companion):
     human.message_str = "fish status"
     companion.observe(human, NOW + timedelta(minutes=15))
     assert companion.store.state(SCOPE) == scheduled
+
+
+async def test_content_service_failure_still_queues_text_without_charging_unanswered(
+    companion, monkeypatch, caplog
+):
+    from dataclasses import replace
+    from unittest.mock import AsyncMock
+
+    from dswhale.content import ContentError
+
+    moment = NOW + timedelta(hours=2)
+    monkeypatch.setattr("dswhale.adapter.now_utc", lambda: moment)
+    companion.settings = replace(companion.settings, discover_enabled=True)
+    companion.scheduler.settings = companion.settings
+    companion.content.recommend = AsyncMock(side_effect=ContentError("private synthetic detail"))
+    await companion.tick(NOW)
+    await companion.tick(moment)
+    queued = companion.context.queue.get_nowait()
+    assert "观察资料" not in queued.message_str
+    status = companion.status(event(companion.context))
+    assert "内容服务暂不可用，先用文字开场" in status
+    assert "今日活动次数：1/3" in status
+    assert companion.store.state(SCOPE)["unanswered"] == 0
+    await queued.send(queued.plain_result("合成开场"))
+    await queued.send(queued.plain_result("第二条"))
+    assert companion.store.state(SCOPE)["unanswered"] == 1
+    assert "private synthetic detail" not in caplog.text
+
+
+async def test_late_tick_logs_offline_once_and_keeps_original_due(companion, caplog):
+    due = NOW + timedelta(hours=2)
+    await companion.tick(NOW)
+    sockets = companion.context.client._active_websockets
+    companion.context.client._active_websockets = []
+    with caplog.at_level("INFO", logger="dswhale"):
+        await companion.tick(due)
+        await companion.tick(due + timedelta(seconds=30))
+    assert sum("offline" in message for message in caplog.messages) == 1
+    assert companion.store.state(SCOPE)["next_due"] == due.timestamp()
+    assert not companion.store.recent_activities(SCOPE)
+    companion.context.client._active_websockets = sockets
+    await companion.tick(due + timedelta(minutes=1))
+    assert companion.context.queue.qsize() == 1
+
+
+async def test_video_observation_failure_calls_text_path_and_health_exposes_only_safe_code(
+    companion, monkeypatch
+):
+    import json
+    from dataclasses import replace
+    from unittest.mock import AsyncMock
+
+    from dswhale.content import Video
+    from dswhale.media import MediaError
+
+    companion.settings = replace(companion.settings, discover_enabled=True)
+    companion.scheduler.settings = companion.settings
+    companion.content.recommend = AsyncMock(
+        return_value=[Video("https://www.bilibili.com/video/BV1234567890", "合成视频")]
+    )
+    monkeypatch.setattr(companion, "watch", AsyncMock(side_effect=MediaError("private detail")))
+    await companion.tick(NOW)
+    await companion.tick(NOW + timedelta(hours=2))
+    queued = companion.context.queue.get_nowait()
+    assert "观察资料" not in queued.message_str
+    companion.write_health()
+    health_file = companion.store.path.with_name("health.json")
+    data = json.loads(health_file.read_text(encoding="utf-8"))
+    assert data["videoDiscovery"] == "video-error"
+    assert "private detail" not in health_file.read_text(encoding="utf-8")
+
+
+async def test_content_service_backoff_recovers_without_blocking_chat(companion):
+    from dataclasses import replace
+    from unittest.mock import AsyncMock
+
+    from dswhale.content import ContentError
+
+    companion.settings = replace(companion.settings, discover_enabled=True)
+    companion.content.recommend = AsyncMock(side_effect=[ContentError("unreachable"), []])
+    await companion._autonomous_prompt(NOW, SCOPE)
+    assert companion.discovery_status == "unavailable"
+    await companion._autonomous_prompt(NOW + timedelta(minutes=5), SCOPE)
+    assert companion.content.recommend.await_count == 1
+    await companion._autonomous_prompt(NOW + timedelta(minutes=30), SCOPE)
+    assert companion.content.recommend.await_count == 2
+    assert companion.discovery_status == "ok"

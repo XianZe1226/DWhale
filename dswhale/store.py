@@ -35,6 +35,9 @@ class Store:
                 updated REAL NOT NULL, error TEXT NOT NULL DEFAULT ''
             );
             CREATE INDEX IF NOT EXISTS activities_scope_day ON activities(scope, local_day);
+            CREATE TABLE IF NOT EXISTS submitted_activities (
+                id TEXT PRIMARY KEY REFERENCES activities(id)
+            );
             CREATE TABLE IF NOT EXISTS journals (
                 id INTEGER PRIMARY KEY, scope TEXT NOT NULL, url TEXT NOT NULL,
                 title TEXT NOT NULL, summary TEXT NOT NULL, evidence TEXT NOT NULL,
@@ -118,6 +121,35 @@ class Store:
             (status, now, error[:200], activity_id, *permitted[status]),
         )
         return cursor.rowcount == 1
+
+    def mark_submission(self, activity_id: str) -> bool:
+        """Claim the unanswered budget just before the first QQ submission."""
+        with self.transaction() as db:
+            activity = self.activity(activity_id)
+            if not activity or activity.status != "queued":
+                return False
+            inserted = db.execute(
+                "INSERT OR IGNORE INTO submitted_activities VALUES (?)", (activity_id,)
+            )
+            if inserted.rowcount:
+                db.execute(
+                    "UPDATE sessions SET unanswered=unanswered+1 WHERE scope=? AND last_human<=?",
+                    (activity.scope, activity.created),
+                )
+            return True
+
+    def was_submitted(self, activity_id: str) -> bool:
+        return (
+            self.db.execute(
+                "SELECT 1 FROM submitted_activities WHERE id=?", (activity_id,)
+            ).fetchone()
+            is not None
+        )
+
+    def settle_unconfirmed(self, activity_id: str, now: float, error: str):
+        with self.transaction():
+            terminal = "uncertain" if self.was_submitted(activity_id) else "failed"
+            return self.transition(activity_id, terminal, now, error)
 
     def recover_pending(self, now: float):
         self.db.execute(

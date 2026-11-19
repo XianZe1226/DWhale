@@ -465,6 +465,11 @@ def delivery_companion(channel="official", mode="natural"):
     value.closed = False
     value.pending = {}
     transitions = []
+    submitted = set()
+
+    def mark_submission(activity_id):
+        submitted.add(activity_id)
+        return True
 
     value.store = SimpleNamespace(
         activity=lambda activity_id: SimpleNamespace(
@@ -472,6 +477,10 @@ def delivery_companion(channel="official", mode="natural"):
         ),
         transition=lambda activity_id, status, *args, **kwargs: transitions.append(
             (activity_id, status)
+        ),
+        mark_submission=mark_submission,
+        settle_unconfirmed=lambda activity_id, *args: transitions.append(
+            (activity_id, "uncertain" if activity_id in submitted else "failed")
         ),
     )
     value.binding_by_scope = lambda scope: SimpleNamespace(channel=channel)

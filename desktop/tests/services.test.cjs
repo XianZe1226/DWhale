@@ -293,3 +293,23 @@ test('settings migrations allow bounded Windows ACL work and report genuine time
   await rejected;
   assert.equal(deadline, 60000);
 });
+
+test('only current safe video discovery warnings reach the desktop', async t => {
+  const { readConnectionHealth } = require('../lib/services.cjs');
+  const host = await fs.mkdtemp(path.join(os.tmpdir(), 'dwhale-video-discovery-'));
+  t.after(() => fs.rm(host, { recursive: true, force: true }));
+  const file = path.join(host, 'data/plugin_data/astrbot_plugin_dswhale/health.json');
+  await fs.mkdir(path.dirname(file), { recursive: true });
+  const options = { host, running: true, now: 2000000 };
+  const report = { format: 2, updatedAt: 1999, channels: {
+    official: { bound: true, platformReady: true, protocolConnected: true },
+  }, videoDiscovery: 'unavailable' };
+  await fs.writeFile(file, JSON.stringify(report));
+  const healthy = await readConnectionHealth(options);
+  assert.equal(healthy.videoDiscovery, 'unavailable');
+  assert.equal(healthy.channels.official.state, 'connected');
+  assert.equal((await readConnectionHealth({ ...options, running: false })).videoDiscovery, undefined);
+  assert.equal((await readConnectionHealth({ ...options, now: 2200000 })).videoDiscovery, undefined);
+  await fs.writeFile(file, JSON.stringify({ ...report, videoDiscovery: 'http://synthetic.invalid/' }));
+  assert.equal((await readConnectionHealth(options)).videoDiscovery, undefined);
+});

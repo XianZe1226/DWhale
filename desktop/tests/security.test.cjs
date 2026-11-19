@@ -72,3 +72,12 @@ test('settings history and field restore payloads are allowlisted', () => {
   assert.throws(() => validateRequest(event, shell, 'settings-restore-field', { ...payload, field: 'onebotToken' }), /恢复请求无效/);
   assert.throws(() => validateRequest(event, shell, 'settings-history', { extra: true }), /不接受额外参数/);
 });
+
+test('the release-page action accepts no caller-provided URL or foreign frame', () => {
+  const { validateRequest } = require('../lib/security.cjs');
+  const shell = { mainFrame: {} };
+  const event = { sender: shell, senderFrame: shell.mainFrame };
+  assert.doesNotThrow(() => validateRequest(event, shell, 'open-release-page'));
+  assert.throws(() => validateRequest(event, shell, 'open-release-page', { url: 'https://synthetic.invalid/' }), /额外参数/);
+  assert.throws(() => validateRequest({ ...event, senderFrame: {} }, shell, 'open-release-page'), /不允许/);
+});

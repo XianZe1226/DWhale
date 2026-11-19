@@ -121,6 +121,7 @@ def _scheduler(tmp_path, **extra):
 
 def _finish_activity(activity, store, now):
     store.transition(activity.id, "queued", now.timestamp())
+    assert store.mark_submission(activity.id)
     store.transition(activity.id, "sent", now.timestamp())
 
 

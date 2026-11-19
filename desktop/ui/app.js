@@ -141,7 +141,7 @@
     const connecting=current?.stage==='downloading'&&ratio===0&&transferred===0&&cached===0?' · 正在连接下载服务器…':'';
     const bar=active||current&&['downloading','restarting','verifying','downloaded','install-ready'].includes(current.phase)?`<div class="app-update-progress" id="app-update-progress" role="group" aria-label="更新进度"><div class="update-progress-heading"><span class="spinner" aria-hidden="true"></span><strong>${esc(label)}</strong>${percent?`<span>${esc(percent)}</span>`:''}</div><progress max="1"${ratio!==null&&ratio>0?` value="${ratio}"`:''} aria-label="${esc(label)}"></progress><p>${esc(cachedNote||measured||'请保持应用打开，完成后会提示覆盖安装')}${connecting}</p></div>`:'';
     const action=ready?button(active?'正在更新…':'更新','app-update-start',{primary:true,id:'app-update-start',off:off||!data.state.installed}):update.recovery?.requiresHealthVerification?button('修复并检查环境','install',{primary:true,off:off||data.state.running}):button('检查更新','app-update-check',{id:'app-update-check',off:off||update.recovery?.servicesMustRemainStopped===true});
-    return `<section class="card reliability-card app-update-card" aria-labelledby="app-update-title"${active?' aria-busy="true"':''}><div class="reliability-heading"><div><h2 id="app-update-title">应用更新</h2><p>发现新版后点击更新。下载完成会提示覆盖安装，安装前自动备份本机数据。</p></div>${badge(phases[update.phase]||'自动检查更新',update.error?'warn':'')}</div><dl class="update-versions"><div><dt>当前版本</dt><dd>${esc(update.currentVersion||data.state.version||'待读取')}</dd></div>${ready?`<div><dt>新版本</dt><dd>${esc(update.targetVersion||'待读取')}</dd></div>`:''}</dl>${bar}${update.error?`<p class="recovery-note" role="alert">${esc(update.error.message)}</p>`:''}<div class="card-actions">${action}</div><details id="app-update-options" class="update-options"${updateOptionsOpen ? ' open' : ''}><summary>更新选项</summary><label for="app-update-channel">更新通道</label><select id="app-update-channel"${disabled(off)}><option value="stable"${channel==='stable'?' selected':''}>稳定版</option><option value="alpha"${channel==='alpha'?' selected':''}>Alpha 预览版</option></select><p>应用运行时会自动检查新版。下载使用系统网络，更新清单经签名验证、安装包校验完整性；这不替代操作系统签名或系统公证。</p></details></section>`;
+    return `<section class="card reliability-card app-update-card" aria-labelledby="app-update-title"${active?' aria-busy="true"':''}><div class="reliability-heading"><div><h2 id="app-update-title">应用更新</h2><p>发现新版后点击更新。下载完成会提示覆盖安装，安装前自动备份本机数据。</p></div>${badge(phases[update.phase]||'自动检查更新',update.error?'warn':'')}</div><dl class="update-versions"><div><dt>当前版本</dt><dd>${esc(update.currentVersion||data.state.version||'待读取')}</dd></div>${ready?`<div><dt>新版本</dt><dd>${esc(update.targetVersion||'待读取')}</dd></div>`:''}</dl>${bar}${update.error?`<p class="recovery-note" role="alert">${esc(update.error.message)}</p>`:''}<div class="card-actions">${action}</div><details id="app-update-options" class="update-options"${updateOptionsOpen ? ' open' : ''}><summary>更新选项</summary><label for="app-update-channel">更新通道</label><select id="app-update-channel"${disabled(off)}><option value="stable"${channel==='stable'?' selected':''}>稳定版</option><option value="alpha"${channel==='alpha'?' selected':''}>Alpha 预览版</option></select><p>应用运行时会自动检查新版。下载使用系统网络，更新清单经签名验证、安装包校验完整性；这不替代操作系统签名或系统公证。</p>${button('打开官方发布页','open-release-page',{off})}</details></section>`;
   }
   function backupCard(data) {
     const backups=Array.isArray(data.workspace.backups)?data.workspace.backups:[],off=!desktop(data)||busy(data);
@@ -206,10 +206,20 @@
       ${data.state.running ? '<p class="inline-note">请先停止服务，再更新或修复环境。</p>' : ''}${progress(data)}
       <div class="section-heading"><h2>环境组件</h2><span>${data.state.components.length ? `${data.state.components.length} 项` : '检查后显示'}</span></div><section class="card component-table"><table><thead><tr><th scope="col">组件</th><th scope="col">版本</th><th scope="col">状态</th></tr></thead><tbody>${data.state.components.length ? data.state.components.map(c => { const status = labels[c.status] || labels.unknown; return `<tr><td><strong>${esc(c.label)}</strong><span class="component-detail">${esc(c.detail)}</span></td><td class="version-text">${esc(c.version || '—')}</td><td>${badge(status[0], status[1])}</td></tr>`; }).join('') : '<tr><td colspan="3" class="empty-state">尚无检查结果。点击「重新检查」获取本机状态。</td></tr>'}</tbody></table></section>${versionMatrix(data)}${upstreamNotice(data)}${healthCard(data)}<p class="footnote">${icon('shield')}环境准备不会启动对话服务。升级应用时，会保留你的配置、记忆和备份。</p>`;
   }
+  function videoDiscoveryNote(data) {
+    if (!data.state.running || !data.settings?.proactiveEnabled) return '';
+    const state = data.workspace?.official?.videoDiscovery;
+    const message = {
+      invalid: '视频发现地址无效，主动聊天会先用文字开场。',
+      unavailable: '视频发现服务暂不可用，主动聊天会先用文字开场。',
+      'video-error': '上次视频读取未完成，主动聊天已改用文字开场。',
+    }[state];
+    return message ? `<p class="inline-note" role="status">${esc(message)}</p>` : '';
+  }
   function connect(data) {
     const value = draft || data.settings;
     if (!value) return `<section class="page-heading"><h1>QQ 官方机器人</h1></section><section class="card">${button('读取连接设置','settings-get',{off:!desktop(data)||busy(data)})}</section>`;
-    return `<section class="page-heading"><h1>QQ 官方机器人</h1>${button('检查状态','connections-status',{off:!desktop(data)||busy(data)})}</section><form id="connection-form">${officialCard(data)}${preference(data,value,'proactiveEnabled','主动找你聊','聊完隔一阵，大肥鱼会在安静时段以外主动开个话题。')}${connectionOptions(data,value)}<div class="card-actions">${button('保存设置','save-settings',{off:!desktop(data)||busy(data)})}</div></form>`;
+    return `<section class="page-heading"><h1>QQ 官方机器人</h1>${button('检查状态','connections-status',{off:!desktop(data)||busy(data)})}</section><form id="connection-form">${officialCard(data)}${preference(data,value,'proactiveEnabled','主动找你聊','聊完隔一阵，大肥鱼会在安静时段以外主动开个话题。')}${videoDiscoveryNote(data)}${connectionOptions(data,value)}<div class="card-actions">${button('保存设置','save-settings',{off:!desktop(data)||busy(data)})}</div></form>`;
   }
   function extensionCard(data, id) {
     const value = data.extensions?.[id];

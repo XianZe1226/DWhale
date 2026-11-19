@@ -284,8 +284,13 @@ async def finish_watch(service, job, outcome, *, error=""):
             activity.id, "failed", time.time(), "看完汇报已保存；暂停、安静时段或推送关闭"
         )
         return
+    if not c.delivery_platform_ready(binding):
+        c.store.settle_unconfirmed(activity.id, time.time(), "QQ 已离线，观看结果已保存")
+        return
     # Claim before entering transport. A timeout cannot authorize another attempt.
-    if not c.store.transition(activity.id, "queued", time.time()):
+    if not c.store.transition(activity.id, "queued", time.time()) or not c.store.mark_submission(
+        activity.id
+    ):
         return
     try:
         from .qq_transport import send_owner_text
@@ -293,5 +298,5 @@ async def finish_watch(service, job, outcome, *, error=""):
         confirmed = await send_owner_text(c, text, binding)
         c.store.transition(activity.id, "sent" if confirmed else "uncertain", time.time())
     except BaseException:
-        c.store.transition(activity.id, "uncertain", time.time(), "看完汇报投递未确认")
+        c.store.settle_unconfirmed(activity.id, time.time(), "看完汇报投递未确认")
         raise

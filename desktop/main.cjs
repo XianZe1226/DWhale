@@ -14,7 +14,7 @@ const { ServiceSupervisor, settingsCommand, replyStylePreview, readConnectionHea
 const { ExtensionRunner, runExtensionAction } = require('./lib/extensions.cjs');
 const { Operations } = require('./lib/operations.cjs');
 const { Workspace, WORKSPACE_ACTIONS } = require('./lib/workspace.cjs');
-const { AppUpdater, UpdateError } = require('./lib/app-updater.cjs');
+const { AppUpdater, UpdateError, protocol: updateProtocol } = require('./lib/app-updater.cjs');
 const runtimeLockModule = require('./lib/runtime-lock.cjs');
 const { normalizeVersion } = require('./lib/update-protocol.cjs');
 const updateChain = require('./lib/update-chain.cjs');
@@ -76,12 +76,14 @@ function platformTarget(platforms, type, boundId) {
 async function officialHealthStatus(configured = false) {
   let protocolConnected = false;
   let gatewayBlocked = false;
+  let videoDiscovery;
   try {
     const health = await readConnectionHealth({ host: manager.host, running: supervisor.running, startedAt: supervisor.startedAt || 0 });
     protocolConnected = health.channels.official.state === 'connected';
     gatewayBlocked = health.channels.official.state === 'blocked';
+    videoDiscovery = health.videoDiscovery;
   } catch {}
-  return { configured, protocolConnected, ...(gatewayBlocked ? { gatewayBlocked } : {}) };
+  return { configured, protocolConnected, ...(gatewayBlocked ? { gatewayBlocked } : {}), ...(videoDiscovery ? { videoDiscovery } : {}) };
 }
 function publishOfficialStatus(patch, completeStartup = false) {
   const startup = { stage: supervisor?.running ? patch?.protocolConnected ? 'ready' : 'official-connecting' : 'stopped' };
@@ -367,6 +369,10 @@ async function finishPendingUpdate() {
 }
 async function perform(action, payload) {
   if (shutdownRequested) throw new UserActionError('应用正在退出');
+  if (action === 'open-release-page') {
+    await shell.openExternal(`https://github.com/${updateProtocol.REPOSITORY}/releases`);
+    return {};
+  }
   if (action === 'inspect') return activeAction ? state : refresh();
   if (action === 'home') { hidePanel(); return state; }
   if (action === 'settings-get') return cachedRead('settings', () => settingsCommand(manager, 'read'));
