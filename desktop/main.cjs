@@ -60,9 +60,10 @@ function publish(patch = {}) {
   return state;
 }
 function syncConnectionMonitor(refreshNow = false) {
-  const active = !shutdownRequested && !systemSuspended && Boolean(visibleWindow());
+  const visible = !shutdownRequested && !systemSuspended && Boolean(visibleWindow());
+  const active = visible && Boolean(supervisor?.running);
   externalConnectionMonitor?.setActive(active);
-  if (active && stateDeliveryPending) deliverState();
+  if (visible && stateDeliveryPending) deliverState();
   if (active && refreshNow) void externalConnectionMonitor?.refresh();
 }
 function platformTarget(platforms, type, boundId) {
@@ -567,6 +568,34 @@ async function createWindow() {
   const downloadSession=session.fromPartition('persist:dswhale-downloads');
   const transport=createElectronTransport(downloadSession);
   manager = new RuntimeManager({ source, runtime: path.join(app.getPath('userData'), 'runtime'), fetch:transport,proxyResolver:()=>systemProxyURL(downloadSession),onProgress: patch => publish(patch) });
+  const runtime = manager.runtime;
+  const powerPath = path.join(runtime, 'desktop-power');
+  let onBattery = false, observedPower, savedPower, pendingPower = Promise.resolve();
+  function syncPower() {
+    if (!['win32', 'darwin'].includes(process.platform) || typeof powerMonitor.isOnBatteryPower !== 'function') return pendingPower;
+    let mode;
+    try { mode = powerMonitor.isOnBatteryPower() ? 'battery' : 'ac'; }
+    catch { mode = 'battery'; }
+    onBattery = mode === 'battery';
+    if (mode !== observedPower) {
+      observedPower = mode;
+      syncConnectionMonitor(true);
+    }
+    // Only the application-owned runtime receives the OS signal. Writes are
+    // serialized so rapid unplug/replug events cannot publish an older mode.
+    pendingPower = pendingPower.then(async () => {
+      if (mode === savedPower) return;
+      const temporary = `${powerPath}.${crypto.randomUUID()}.tmp`;
+      try {
+        await fs.mkdir(runtime, { recursive: true });
+        await fs.writeFile(temporary, `${mode}\n`, { flag: 'wx', mode: 0o600 });
+        await fs.rename(temporary, powerPath);
+        savedPower = mode;
+      } catch { await fs.rm(temporary, { force: true }).catch(() => {}); }
+    });
+    return pendingPower;
+  }
+  await syncPower();
   extensions = new ExtensionRunner(manager);
   supervisor = new ServiceSupervisor({ manager, onChange: patch => { if (!patch.running && panelView) closePanel(); publish(patch); syncConnectionMonitor(true); } });
   // Runtime activation is committed by bootstrap.prepare() after its staged
@@ -636,21 +665,32 @@ async function createWindow() {
     shouldRun: () => !shutdownRequested && !activeAction && supervisor.running,
     read: () => officialHealthStatus(state.setup?.qqConfigured === true),
     onResult: status => publishOfficialStatus(status),
+    interval: () => onBattery ? 20000 : 5000,
   });
-  externalConnectionMonitor.start(!systemSuspended && Boolean(visibleWindow()));
+  externalConnectionMonitor.start(false);
+  syncConnectionMonitor();
   for (const event of ['show', 'restore', 'focus']) window.on(event, () => syncConnectionMonitor(true));
   for (const event of ['hide', 'minimize']) window.on(event, () => syncConnectionMonitor());
   let wasRunning = false;
+  powerMonitor.on('on-battery', syncPower);
+  powerMonitor.on('on-ac', syncPower);
+  void syncPower();
   powerMonitor.on('suspend', () => { wasRunning = supervisor.running; systemSuspended = true; syncConnectionMonitor(); });
   powerMonitor.on('resume', () => {
     if (shutdownRequested) return;
+    void syncPower();
     systemSuspended = false;
     updateScheduler?.resume();
     syncConnectionMonitor(true);
     if (preferences.resumeAfterWake && wasRunning && !supervisor.running && !activeAction) perform('start').catch(() => publish({ error: '系统已唤醒，请重新检查连接' }));
     else publish({ notice: '系统已唤醒，可重新检查连接状态' });
   });
-  window.on('closed', () => { externalConnectionMonitor?.stop(); window = null; });
+  window.on('closed', () => {
+    powerMonitor.off('on-battery', syncPower);
+    powerMonitor.off('on-ac', syncPower);
+    externalConnectionMonitor?.stop();
+    window = null;
+  });
 }
 if (!app.requestSingleInstanceLock()) app.quit();
 else {

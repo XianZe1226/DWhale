@@ -137,6 +137,7 @@ def write_control_file(path, payload):
 class BiliLedger:
     def __init__(self, path):
         Path(path).parent.mkdir(parents=True, exist_ok=True)
+        self.work_available = asyncio.Event()
         self.db = sqlite3.connect(path, isolation_level=None)
         self.db.row_factory = sqlite3.Row
         self.db.executescript("""
@@ -201,6 +202,7 @@ class BiliLedger:
         if self.db.execute("SELECT COUNT(*) FROM jobs WHERE status='queued'").fetchone()[0] >= 50:
             raise ValueError("Work queue full")
         self.db.execute("INSERT INTO jobs VALUES(?,?,'queued',?)", (ident, payload, time.time()))
+        self.work_available.set()
         return True
 
     def next_job(self):
@@ -413,6 +415,13 @@ class BiliService:
                     if not self._valid_request(request) or not self.allowed():
                         await self._reply(ident, False)
                         continue
+                    # The upstream nightly wake has a numeric suffix. Inbox,
+                    # comment and live requests use their own named prefixes.
+                    if re.fullmatch(r"bili-whale-[0-9]+", request["requestId"]) and (
+                        self.companion.on_battery()
+                    ):
+                        await self._reply(ident, False)
+                        continue
                     try:
                         self.ledger.enqueue(request)
                     except (ValueError, TypeError):
@@ -493,17 +502,22 @@ class BiliService:
                 cwd=self.root,
                 env=bridge_environment(os.environ, root=self.root, timezone=self.settings.timezone),
                 disk_limit=1024**3,
+                low_priority=True,
             )
             return json.loads(raw)
 
     async def _work(self):
         while not self.closed:
+            self.ledger.work_available.clear()
             if not self.allowed() or getattr(self.companion, "video_busy", False):
-                await asyncio.sleep(5)
+                if self.ledger.busy():
+                    await asyncio.sleep(5)
+                else:
+                    await self.ledger.work_available.wait()
                 continue
             job = self.ledger.next_job()
             if not job:
-                await asyncio.sleep(1)
+                await self.ledger.work_available.wait()
                 continue
             source = job.get("source")
             activity = None

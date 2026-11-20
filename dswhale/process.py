@@ -26,11 +26,15 @@ async def run_process(
     env: dict[str, str] | None = None,
     output_limit: int = 4 * 1024 * 1024,
     disk_limit: int | None = None,
+    low_priority: bool = False,
 ) -> str:
     options = (
         {"start_new_session": True}
         if os.name != "nt"
-        else {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+        else {
+            "creationflags": subprocess.CREATE_NEW_PROCESS_GROUP
+            | (subprocess.BELOW_NORMAL_PRIORITY_CLASS if low_priority else 0)
+        }
     )
     try:
         process = await asyncio.create_subprocess_exec(
@@ -55,22 +59,23 @@ async def run_process(
             if keep:
                 output.extend(chunk)
 
-    async def monitor():
-        while process.returncode is None:
-            if cwd and disk_limit is not None:
+    tasks = [
+        asyncio.create_task(drain(process.stdout, True)),
+        asyncio.create_task(drain(process.stderr, False)),
+        asyncio.create_task(process.wait()),
+    ]
+    if cwd is not None and disk_limit is not None:
+
+        async def monitor():
+            while process.returncode is None:
                 size = await asyncio.to_thread(
                     lambda: sum(p.stat().st_size for p in cwd.rglob("*") if p.is_file())
                 )
                 if size > disk_limit:
                     raise ProcessError("媒体占用空间超过限制")
-            await asyncio.sleep(0.05)
+                await asyncio.sleep(0.05)
 
-    tasks = [
-        asyncio.create_task(drain(process.stdout, True)),
-        asyncio.create_task(drain(process.stderr, False)),
-        asyncio.create_task(process.wait()),
-        asyncio.create_task(monitor()),
-    ]
+        tasks.append(asyncio.create_task(monitor()))
     try:
         async with asyncio.timeout(timeout):
             await asyncio.gather(*tasks)

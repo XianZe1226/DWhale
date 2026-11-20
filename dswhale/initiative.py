@@ -116,10 +116,10 @@ class Initiative:
             (scope, due),
         )
 
-    def claim(self, scope, now):
+    def claim(self, scope, now, *, minimum_gap=0):
         stamp = now.timestamp()
         row = self.db.execute(
-            "SELECT next_check FROM initiative WHERE scope=?", (scope,)
+            "SELECT next_check,updated FROM initiative WHERE scope=?", (scope,)
         ).fetchone()
         if row is None:
             self.db.execute(
@@ -127,7 +127,7 @@ class Initiative:
                 (scope, stamp + random.randint(8, 26) * 60),
             )
             return None
-        if row["next_check"] > stamp:
+        if max(row["next_check"], row["updated"] + minimum_gap) > stamp:
             return None
         deadline = stamp + 5 * 60
         changed = self.db.execute(
@@ -136,11 +136,11 @@ class Initiative:
         )
         return deadline if changed.rowcount else None
 
-    def finish(self, scope, claim, now, decision=None, *, offer=False):
+    def finish(self, scope, claim, now, decision=None, *, offer=False, minimum_retry=0):
         if decision is None:
             self.db.execute(
                 "UPDATE initiative SET next_check=?,outcome='unavailable' WHERE scope=? AND next_check=?",
-                (now.timestamp() + random.randint(12, 35) * 60, scope, claim),
+                (now.timestamp() + max(minimum_retry, random.randint(12, 35) * 60), scope, claim),
             )
             return None
         row = self.state(scope)

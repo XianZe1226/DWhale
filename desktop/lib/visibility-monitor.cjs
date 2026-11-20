@@ -27,7 +27,8 @@ class VisibilityMonitor {
   schedule() {
     this.clearScheduled();
     if (this.stopped || !this.active) return;
-    this.timer = this.setTimer(() => { this.timer = null; void this.refresh(); }, this.interval);
+    const delay = typeof this.interval === 'function' ? this.interval() : this.interval;
+    this.timer = this.setTimer(() => { this.timer = null; void this.refresh(); }, delay);
     this.timer?.unref?.();
   }
 

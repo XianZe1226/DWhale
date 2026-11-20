@@ -638,6 +638,20 @@ test('official mode offers official setup and exact private binding without NapC
  view=load().connectionViewModel(base);assert.equal(view.stage,'ready');assert.doesNotMatch(JSON.stringify(view),/napcat-install|napcat-wire/);
 });
 
+test('QQ settings has one switch for model-led proactive chat on old installations', async () => {
+  const settings = { proactiveEnabled: false, spontaneousChat: true, continueUnanswered: true };
+  const app = renderApp({ screen: 'connect', invoke: async action => action === 'inspect'
+    ? { installed: true, running: false }
+    : settings });
+  await app.settle();
+  assert.match(app.html(), /id="proactiveEnabled"/);
+  assert.doesNotMatch(app.html(), /id="(?:spontaneousChat|continueUnanswered)"|随心找我聊/);
+  app.input('officialOwnerUMO', 'qq:FriendMessage:SYNTHETIC_DRAFT');
+  await app.change('proactiveEnabled', true);
+  assert.deepEqual(app.calls.find(([action]) => action === 'settings-save')?.[1], { patch: { proactiveEnabled: true } });
+  assert.match(app.html(), /SYNTHETIC_DRAFT/);
+});
+
 test('saving an unchanged connection form reports no changes without writing', async () => {
   const settings = { ownerQQ: '123456', platformId: 'qq', dashboardPort: 6199, dashboardPort: 6185, unusedLegacyToken: 'token', proactiveEnabled: true };
   const app = renderApp({ screen: 'connect', workspace: workspaceStatus(), invoke: async action => action === 'inspect'

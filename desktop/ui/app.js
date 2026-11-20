@@ -219,7 +219,7 @@
   function connect(data) {
     const value = draft || data.settings;
     if (!value) return `<section class="page-heading"><h1>QQ 官方机器人</h1></section><section class="card">${button('读取连接设置','settings-get',{off:!desktop(data)||busy(data)})}</section>`;
-    return `<section class="page-heading"><h1>QQ 官方机器人</h1>${button('检查状态','connections-status',{off:!desktop(data)||busy(data)})}</section><form id="connection-form">${officialCard(data)}${preference(data,value,'proactiveEnabled','主动找你聊','聊完隔一阵，大肥鱼会在安静时段以外主动开个话题。')}${preference(data,value,'spontaneousChat','随心找我聊','让鱼用聊天模型决定什么时候开口、说什么。配合上方的主动聊天开关。')}${value.spontaneousChat?'':preference(data,value,'continueUnanswered','没回复也偶尔来聊','按原间隔和每天的次数来，安静时段休息。')}${preference(data,value,'dailyDiaryEnabled','晚上写日记','23 点交给聊天模型整理前一天收到的文字，在本机保存日记和记忆。用 /fish diary 查看。')}${connectionOptions(data,value)}<div class="card-actions">${button('保存设置','save-settings',{off:!desktop(data)||busy(data)})}</div></form>`;
+    return `<section class="page-heading"><h1>QQ 官方机器人</h1>${button('检查状态','connections-status',{off:!desktop(data)||busy(data)})}</section>${preference(data,value,'proactiveEnabled','主动找你聊','切换后自动保存。大肥鱼自己挑时间和话题，即使你没回复，它也可以过一阵再来聊。')}<form id="connection-form">${officialCard(data)}${preference(data,value,'dailyDiaryEnabled','晚上写日记','每天 23 点整理前一天的对话，用 /fish diary 查看。')}${connectionOptions(data,value)}<div class="card-actions">${button('保存设置','save-settings',{off:!desktop(data)||busy(data)})}</div></form>`;
   }
   function extensionCard(data, id) {
     const value = data.extensions?.[id];
@@ -272,7 +272,7 @@
     replyStyleCustomCleanup:'回复自定义清理',
   };
   const historyRestoreFields=new Set([
-    'officialOwnerUMO','dashboardPort','biliEnabled','proactiveEnabled','spontaneousChat','continueUnanswered','dailyDiaryEnabled',
+    'officialOwnerUMO','dashboardPort','biliEnabled','proactiveEnabled','dailyDiaryEnabled',
     'replyStyleMode','replyStyleMaxBubbles','replyStyleInterval','replyStylePunctuation',
     'replyStylePrompt','replyStyleCustomRegex','replyStyleCustomCleanup',
   ]);
@@ -500,7 +500,7 @@
     if(target.id==='app-update-channel'){updateChannel=target.value;return;}
 
     if(target.id.startsWith('pref-')){if(!preferencesDraft)preferencesDraft={...controller.get().workspace.preferences};preferencesDraft[target.id.slice(5)]=target.checked===true;preferencesDirty=true;return;}
-    if(!['dashboardPort','biliEnabled','proactiveEnabled','spontaneousChat','continueUnanswered','dailyDiaryEnabled','officialOwnerUMO'].includes(target.id))return;
+    if(!['dashboardPort','biliEnabled','proactiveEnabled','dailyDiaryEnabled','officialOwnerUMO'].includes(target.id))return;
     markDraft(target.id, target.type === 'checkbox' ? target.checked : target.value);
   }
   async function saveSettings() {
@@ -604,9 +604,20 @@
   root.addEventListener('input', event => {
     if (event.target.matches('input,textarea') && event.target.type !== 'checkbox') readField(event.target);
   });
-  root.addEventListener('change', event => {
+  root.addEventListener('change', async event => {
     if (!event.target.matches('input,select,textarea')) return;
     readField(event.target);
+    if (event.target.id === 'proactiveEnabled' && dirtyFields.has('proactiveEnabled')) {
+      const revision = controller.get().settings?.configRevision;
+      await run('settings-save', { patch: { proactiveEnabled: event.target.checked }, ...(revision ? { expectedRevision: revision } : {}) });
+      if (controller.get().error) settingsConflict = true;
+      else {
+        dirtyFields.delete('proactiveEnabled');
+        conflictFields.delete('proactiveEnabled');
+        adoptSettings(controller.get().settings);
+        settingsConflict = false;
+      }
+    }
     render(controller.get());
   });
   root.addEventListener('submit', event => { if (event.target.id === 'connection-form') { event.preventDefault(); saveSettings(); } });

@@ -137,7 +137,7 @@ class ServiceSupervisor {
     const runtime = this.manager.runtime || path.dirname(this.manager.host);
     const hostArgs = [path.join(this.manager.source, 'dswhale/host_start.py'), '--runtime', runtime];
     const args = process.platform === 'win32' ? [path.join(this.manager.source, 'dswhale/winjob.py'), python, ...hostArgs] : hostArgs;
-    const environment = { ...await this.manager.environment(), ASTRBOT_DESKTOP_MANAGED: '1' };
+    const environment = { ...await this.manager.environment(), ASTRBOT_DESKTOP_MANAGED: '1', DSWHALE_DESKTOP_MANAGED: '1' };
     // This application uses its existing dashboard login, not another launcher's session.
     delete environment.ASTRBOT_DESKTOP_SESSION_SECRET;
     this._active(generation);

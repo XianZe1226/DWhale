@@ -129,6 +129,7 @@ class MediaReader:
                             args + ["--skip-download", "--dump-single-json", "--", url],
                             timeout=40,
                             cwd=root,
+                            low_priority=True,
                         )
                         metadata = json.loads(raw)
                         if not isinstance(metadata, dict):
@@ -155,6 +156,7 @@ class MediaReader:
                             timeout=self.settings.media_timeout_seconds,
                             cwd=root,
                             disk_limit=self.settings.max_media_mb * 1024**2,
+                            low_priority=True,
                         )
                         sources = [
                             p
@@ -199,6 +201,7 @@ class MediaReader:
         raw = await run_process(
             ["ffprobe", "-v", "error", "-show_format", "-show_streams", "-of", "json", str(source)],
             timeout=15,
+            low_priority=True,
         )
         info = json.loads(raw)
         duration = self.validate_metadata(
@@ -214,6 +217,10 @@ class MediaReader:
                     "-v",
                     "error",
                     "-nostdin",
+                    "-filter_threads",
+                    "1",
+                    "-threads",
+                    "1",
                     "-ss",
                     str(offset),
                     "-i",
@@ -227,6 +234,7 @@ class MediaReader:
                     str(target),
                 ],
                 timeout=20,
+                low_priority=True,
             )
             if target.is_file():
                 frames.append(target)
@@ -241,6 +249,8 @@ class MediaReader:
                     "-v",
                     "error",
                     "-nostdin",
+                    "-threads",
+                    "1",
                     "-i",
                     str(source),
                     "-vn",
@@ -253,5 +263,6 @@ class MediaReader:
                     str(audio),
                 ],
                 timeout=30,
+                low_priority=True,
             )
         return Evidence(title, source_url, duration, tuple(frames), audio, subtitles)

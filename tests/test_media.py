@@ -18,6 +18,21 @@ async def test_process_output_and_timeout():
         await run_process([sys.executable, "-c", "import time; time.sleep(30)"], timeout=0.1)
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows process priority class")
+async def test_video_process_inherits_below_normal_priority_on_windows():
+    output = await run_process(
+        [
+            sys.executable,
+            "-c",
+            "import ctypes; f=ctypes.windll.kernel32.GetPriorityClass; "
+            "f.argtypes=[ctypes.c_void_p]; print(f(-1))",
+        ],
+        timeout=10,
+        low_priority=True,
+    )
+    assert int(output.strip()) == 0x4000
+
+
 async def test_cancel_kills_process(tmp_path):
     marker = tmp_path / "should-not-exist"
     task = asyncio.create_task(

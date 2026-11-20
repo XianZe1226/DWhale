@@ -49,6 +49,69 @@ async def settle(fish, moment):
     await asyncio.gather(*fish.workers)
 
 
+@pytest.mark.parametrize("enabled", [True, False])
+async def test_managed_chat_switch_uses_model_without_rewriting_legacy_settings(
+    fish, monkeypatch, tmp_path, enabled
+):
+    monkeypatch.setenv("DSWHALE_DESKTOP_MANAGED", "1")
+    monkeypatch.setenv("DSWHALE_RUNTIME_DIR", str(tmp_path))
+    settings = replace(fish.settings, proactive_enabled=enabled, spontaneous_chat=False)
+    managed = Companion(fish.context, settings, fish.store)
+    fish.context.llm_generate.return_value = answer("wait")
+    await settle(managed, NOW)
+    await settle(managed, NOW + timedelta(hours=1))
+    assert fish.context.llm_generate.await_count == int(enabled)
+    assert settings.spontaneous_chat is False
+
+
+async def test_on_battery_model_is_consulted_less_often_and_ac_restores_due_time(fish, monkeypatch):
+    fish.context.llm_generate.return_value = answer("wait", minutes=6)
+    await settle(fish, NOW)
+    first = NOW + timedelta(hours=1)
+    await settle(fish, first)
+    assert fish.context.llm_generate.await_count == 1
+    monkeypatch.setattr(fish, "on_battery", lambda: True)
+    await settle(fish, first + timedelta(minutes=7))
+    assert fish.context.llm_generate.await_count == 1
+    monkeypatch.setattr(fish, "on_battery", lambda: False)
+    await settle(fish, first + timedelta(minutes=8))
+    assert fish.context.llm_generate.await_count == 2
+
+
+def test_power_signal_is_cached_briefly_and_falls_back_to_battery(fish, monkeypatch, tmp_path):
+    policy = tmp_path / "desktop-power"
+    fish._power_path = policy
+    time = 0
+    monkeypatch.setattr("dswhale.adapter.monotonic", lambda: time)
+    assert fish.on_battery()
+    policy.write_text("ac\n", encoding="utf-8")
+    assert fish.on_battery()
+    time += 10
+    assert not fish.on_battery()
+    policy.write_text("battery\n", encoding="utf-8")
+    time += 10
+    assert fish.on_battery()
+
+
+def test_connection_health_only_writes_changes_and_periodic_heartbeat(fish, monkeypatch):
+    moment = NOW
+    monkeypatch.setattr("dswhale.adapter.now_utc", lambda: moment)
+    health = fish.store.path.with_name("health.json")
+
+    def timestamp():
+        fish.write_health()
+        return json.loads(health.read_text(encoding="utf-8"))["updatedAt"]
+
+    assert timestamp() == NOW.timestamp()
+    moment += timedelta(seconds=30)
+    assert timestamp() == NOW.timestamp()
+    moment += timedelta(seconds=30)
+    assert timestamp() == moment.timestamp()
+    moment += timedelta(seconds=15)
+    fish.closed = True
+    assert timestamp() == moment.timestamp()
+
+
 async def test_spontaneous_model_can_wait_then_write_despite_exhausted_classic_quota(
     fish, monkeypatch
 ):

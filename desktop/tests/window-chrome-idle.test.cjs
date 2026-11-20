@@ -168,6 +168,30 @@ test('hidden and minimized windows retain current state and deliver it once afte
   assert.equal(h.messages[0].state.notice, 'latest');
 });
 
+test('Windows battery transitions update the owned runtime without restarting services', async t => {
+  const userData = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'dwhale-power-'));
+  const h = mainHarness({ openWindow: true, userData });
+  t.after(() => { h.disposeMonitoring(); fs.rmSync(userData, { recursive:true, force:true }); });
+  let battery = true;
+  h.powerMonitor.isOnBatteryPower = () => battery;
+  await h.createWindow();
+  const policy = path.join(userData, 'runtime', 'desktop-power');
+  assert.equal(fs.readFileSync(policy, 'utf8').trim(), 'battery');
+  h.changeRunning(true);
+  await h.clock.advance(19_000);
+  assert.equal(h.healthReads(), 1, 'battery stretches the visible connection poll to 20 seconds');
+  battery = false;
+  h.powerMonitor.emit('on-ac');
+  await h.clock.advance(6000);
+  const deadline = Date.now() + 2000;
+  while (fs.readFileSync(policy, 'utf8').trim() === 'battery' && Date.now() < deadline) {
+    await new Promise(resolve => setTimeout(resolve, 5));
+  }
+  assert.equal(fs.readFileSync(policy, 'utf8').trim(), 'ac');
+  assert.equal(h.getState().running, true);
+  assert.ok(h.healthReads() >= 2);
+});
+
 test('appearance persistence failures stay local and retain existing service fault feedback', async () => {
   const h = mainHarness();
   h.publish({ running: true, error: 'existing service fault', feedback: { code: 'PORT-001', active: true } });

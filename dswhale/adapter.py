@@ -6,9 +6,12 @@ import logging
 import os
 import random
 import sqlite3
+import sys
 import tempfile
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from time import monotonic
 from types import SimpleNamespace
 from weakref import WeakValueDictionary
 
@@ -40,6 +43,7 @@ logger = logging.getLogger("dswhale")
 DISCOVERY_TIMEOUT_SECONDS = 8
 AUTOMATIC_VIDEO_TIMEOUT_SECONDS = 45
 DISCOVERY_RETRY_SECONDS = 30 * 60
+BATTERY_CHAT_GAP = 45 * 60
 
 
 def now_utc():
@@ -53,6 +57,21 @@ class DeliveryStopped(RuntimeError):
 class Companion:
     def __init__(self, context, settings: Settings, store: Store):
         self.context = context
+        desktop_managed = os.environ.get("DSWHALE_DESKTOP_MANAGED") == "1"
+        # Desktop keeps the existing switch and uses the same model-led mode
+        # for every enabled installation. Standalone plugin settings still work.
+        if desktop_managed and settings.proactive_enabled and not settings.spontaneous_chat:
+            settings = replace(settings, spontaneous_chat=True)
+        runtime = os.environ.get("DSWHALE_RUNTIME_DIR")
+        self._power_path = (
+            Path(runtime) / "desktop-power"
+            if runtime and desktop_managed and sys.platform in {"win32", "darwin"}
+            else None
+        )
+        self._power_deadline = float("-inf")
+        self._battery = False
+        self._last_health = None
+        self._last_health_at = 0.0
         self.settings = settings
         self.store = store
         self.scheduler = Scheduler(settings, store)
@@ -88,6 +107,19 @@ class Companion:
         self.video_busy = False
         self.store.recover_pending(now_utc().timestamp())
 
+    def on_battery(self):
+        if self._power_path is None:
+            return False
+        now = monotonic()
+        if now >= self._power_deadline:
+            self._power_deadline = now + 10
+            try:
+                with self._power_path.open("rb") as stream:
+                    self._battery = stream.read(16).strip() != b"ac"
+            except OSError:
+                self._battery = True
+        return self._battery
+
     def _channel_health(self, channel):
         """Per-channel flags for the desktop; no identity, token or error text."""
         binding = next(
@@ -117,7 +149,7 @@ class Companion:
             **({"gatewayBlocked": True} if gateway_blocked and not self.closed else {}),
         }
 
-    def write_health(self):
+    def write_health(self, *, force=False):
         """Expose per-channel connection flags, never account IDs or error text."""
         try:
             channels = {channel: self._channel_health(channel) for channel in ("official",)}
@@ -135,7 +167,6 @@ class Companion:
             ).is_file()
             value = {
                 "format": 2,
-                "updatedAt": now_utc().timestamp(),
                 "channels": channels,
                 "qqConnected": connected,
                 "biliReady": ready,
@@ -151,12 +182,16 @@ class Companion:
                 "video-error",
             }:
                 value["videoDiscovery"] = self.discovery_status
+            stamp = now_utc().timestamp()
+            if not force and self._last_health == value and 0 <= stamp - self._last_health_at < 55:
+                return
             target = self.store.path.with_name("health.json")
             fd, name = tempfile.mkstemp(prefix=".health-", dir=target.parent)
             try:
                 with os.fdopen(fd, "w", encoding="utf-8") as stream:
-                    json.dump(value, stream)
+                    json.dump({**value, "updatedAt": stamp}, stream)
                 Path(name).replace(target)
+                self._last_health, self._last_health_at = value, stamp
             finally:
                 Path(name).unlink(missing_ok=True)
         except Exception:
@@ -165,7 +200,7 @@ class Companion:
     async def _health_loop(self):
         while True:
             self.write_health()
-            await asyncio.sleep(15)
+            await asyncio.sleep(30 if self.on_battery() else 15)
 
     def binding_for(self, event):
         """Resolve the binding for this event; synthetic official events carry a marker."""
@@ -888,12 +923,16 @@ class Companion:
             await self._queue_activity(activity, delivery, AUTONOMOUS_PROMPT, now)
         if not delivery or self.closed:
             return
-        if self.settings.daily_diary_enabled and (not self.diary_task or self.diary_task.done()):
-            self.diary_task = self._background(
-                self.diary.run(delivery.umo, self.settings.local_time(now)), "daily-diary"
-            )
+        local = self.settings.local_time(now)
         if (
-            self.discovery_status not in {"off", "invalid"}
+            self.settings.daily_diary_enabled
+            and self.diary.due(delivery.umo, local)
+            and (not self.diary_task or self.diary_task.done())
+        ):
+            self.diary_task = self._background(self.diary.run(delivery.umo, local), "daily-diary")
+        if (
+            not self.on_battery()
+            and self.discovery_status not in {"off", "invalid"}
             and self.settings.video_enabled
             and self.settings.bili_qq_recommendations
             and now.timestamp() >= self._discovery_retry_after
@@ -919,7 +958,8 @@ class Companion:
             return reason
         if self.initiative_task and not self.initiative_task.done():
             return "thinking"
-        if claim := self.initiative.claim(binding.umo, now):
+        minimum_gap = BATTERY_CHAT_GAP if self.on_battery() else 0
+        if claim := self.initiative.claim(binding.umo, now, minimum_gap=minimum_gap):
             self.initiative_task = self._background(
                 self._spontaneous_turn(binding, now, claim), "spontaneous-chat"
             )
@@ -953,7 +993,14 @@ class Companion:
             )
             == "ready"
         )
-        draft = self.initiative.finish(scope, claim, at, decision, offer=offer)
+        draft = self.initiative.finish(
+            scope,
+            claim,
+            at,
+            decision,
+            offer=offer,
+            minimum_retry=BATTERY_CHAT_GAP if self.on_battery() else 0,
+        )
         if draft:
             activity = self.scheduler.reserve(
                 at,
@@ -1131,11 +1178,11 @@ class Companion:
             chat_count = str(daily)
             unanswered = str(state["unanswered"]) + " 次"
             snapshot = self.initiative.state(scope)
-            if snapshot and next_chat.startswith("随心找我聊"):
+            if snapshot and next_chat.startswith("已开启"):
                 if self.initiative_task and not self.initiative_task.done():
-                    next_chat = "随心找我聊，正在想要不要开口"
+                    next_chat = "正在想要不要开口"
                 elif snapshot["outcome"] == "unavailable":
-                    next_chat = "随心找我聊，模型暂未给出有效决定"
+                    next_chat = "模型暂未给出有效决定"
                 thought = self.initiative.current_thought(snapshot, now)
                 if thought.get("mood"):
                     initiative_status = f"最近心情：{thought['mood']}\n"
@@ -1148,9 +1195,10 @@ class Companion:
             "ok": "可用",
         }[self.discovery_status]
         diary = "已开启，23:00 整理前一天" if self.settings.daily_diary_enabled else "未开启"
+        power = "电池供电：减少主动聊天检查，暂缓自动看视频\n" if self.on_battery() else ""
         return (
             f"DWhale {__version__}\n主动聊天：{next_chat}\n"
-            f"今日主动聊天：{chat_count}\n{initiative_status}"
+            f"{power}今日主动聊天：{chat_count}\n{initiative_status}"
             f"连续未回复：{unanswered}\n最近活动：{latest}\n"
             f"长期记忆插件：{'已加载，请用 /lmem status 检查配置' if memory else '未加载 LivingMemory'}\n"
             f"今日自动视频活动：{videos}/1\nOpenBiliClaw：{discovery}\n每日回顾：{diary}\n"
@@ -1214,7 +1262,7 @@ class Companion:
                 raise
             except Exception as error:
                 logger.warning("DSWhale scheduler: %s", type(error).__name__)
-            await asyncio.sleep(30)
+            await asyncio.sleep(60 if self.on_battery() else 30)
 
     async def close(self):
         if self.closed:
@@ -1223,7 +1271,7 @@ class Companion:
         if self.health_task:
             self.health_task.cancel()
             await asyncio.gather(self.health_task, return_exceptions=True)
-        self.write_health()
+        self.write_health(force=True)
         if self.task:
             self.task.cancel()
             await asyncio.gather(self.task, return_exceptions=True)

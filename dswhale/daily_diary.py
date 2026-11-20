@@ -89,12 +89,21 @@ class DailyDiary:
             (scope, now.timestamp() - RAW_RETENTION, scope),
         )
 
-    async def run(self, scope, local):
+    @staticmethod
+    def _day_bounds(local):
         cutoff = local.replace(hour=23, minute=0, second=0, microsecond=0)
         if local < cutoff:
             cutoff -= timedelta(days=1)
         end = cutoff.replace(hour=0)
         start = end - timedelta(days=1)
+        return start, end
+
+    def due(self, scope, local):
+        start, _ = self._day_bounds(local)
+        return self.finished != (scope, start.date().isoformat())
+
+    async def run(self, scope, local):
+        start, end = self._day_bounds(local)
         day = start.date().isoformat()
         identity = (scope, day)
         if self.finished == identity:

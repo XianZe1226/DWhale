@@ -659,13 +659,50 @@ async def test_worker_retains_legacy_pending_watch_without_running_agent(watchin
     service.ledger.db.execute("UPDATE jobs SET payload=? WHERE id=?", (json.dumps(payload), row[0]))
     service.run_agent = AsyncMock()
 
-    async def stop_when_idle(_delay):
+    async def stop_when_idle():
         service.closed = True
 
-    monkeypatch.setattr("dswhale.bili.asyncio.sleep", stop_when_idle)
+    monkeypatch.setattr(service.ledger.work_available, "wait", stop_when_idle)
     await service._work()
     service.run_agent.assert_not_awaited()
     assert service.ledger.status(row[0]) == "uncertain"
     assert service.ledger.result(row[0])
     assert c.store.activity(payload["activity_id"]).status == "failed"
     assert c.context.client.send_private_msg.await_count == 0
+
+
+async def test_battery_defers_bili_nightly_wakes_without_deferring_inbox(watching, monkeypatch):
+    c, service = watching
+    monkeypatch.setattr(c, "on_battery", lambda: True)
+    monkeypatch.setattr(service, "allowed", lambda: True)
+    night = "bili-whale-12345"
+    inbox = "bili-whale-dm-fixture"
+    service.process = SimpleNamespace(
+        stdout=SimpleNamespace(
+            readline=AsyncMock(
+                side_effect=[
+                    (
+                        json.dumps(
+                            {
+                                "type": "prompt",
+                                "id": ident,
+                                "request": {
+                                    "requestId": ident,
+                                    "content": [{"text": "synthetic"}],
+                                },
+                            }
+                        )
+                        + "\n"
+                    ).encode()
+                    for ident in (night, inbox)
+                ]
+                + [b""]
+            )
+        )
+    )
+    monkeypatch.setattr(service, "close", AsyncMock())
+    monkeypatch.setattr(service, "_reply", AsyncMock())
+    await service._read()
+    assert service.ledger.status(night) is None
+    assert service.ledger.status(inbox) == "queued"
+    assert service.ledger.work_available.is_set()

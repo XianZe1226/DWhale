@@ -110,7 +110,7 @@ class Scheduler:
                 now, self._scopes((scope,)), kind="chat", spontaneous=self.settings.spontaneous_chat
             )
         if self.settings.spontaneous_chat and reason == "ready":
-            return "随心找我聊，由鱼决定开口时机"
+            return "已开启，由大肥鱼决定开口时机"
         if reason == "waiting":
             next_chat = self.settings.local_time(datetime.fromtimestamp(due, tz=now.tzinfo))
             return f"预计 {next_chat:%m-%d %H:%M} 后找你聊"
